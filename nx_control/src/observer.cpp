@@ -19,6 +19,7 @@ void DelayedKalmanObserver::reset(double time_s, double position_m) {
   node.covariance.diagonal() << 0.01 * 0.01, 0.10 * 0.10, 0.40 * 0.40;
   nodes_.push_back(node);
   accepted_measurements_ = rejected_measurements_ = too_old_measurements_ = 0;
+  last_update_reason_ = "no_measurement";
 }
 
 void DelayedKalmanObserver::propagate(Eigen::Vector3d& state, Eigen::Matrix3d& covariance,
@@ -83,16 +84,27 @@ bool DelayedKalmanObserver::update_position(double capture_time_s, double positi
                                             double ball_confidence,
                                             double tube_confidence,
                                             VisionStatus status) {
-  if (status == VisionStatus::Lost || nodes_.empty()) return false;
+  if (status == VisionStatus::Lost) {
+    last_update_reason_ = "upstream_reported_lost";
+    return false;
+  }
+  if (nodes_.empty()) {
+    last_update_reason_ = "observer_uninitialized";
+    return false;
+  }
   if ((status == VisionStatus::Predicted &&
        (ball_confidence < config_.predicted_min_confidence ||
         tube_confidence < config_.predicted_min_confidence)) ||
       ball_confidence <= 0.0 || tube_confidence <= 0.0) {
     ++rejected_measurements_;
+    last_update_reason_ = status == VisionStatus::Predicted
+                              ? "predicted_confidence_too_low"
+                              : "invalid_confidence";
     return false;
   }
   if (capture_time_s < nodes_.front().time_s - 1e-6) {
     ++too_old_measurements_;
+    last_update_reason_ = "capture_time_too_old";
     return false;
   }
   capture_time_s = std::clamp(capture_time_s, nodes_.front().time_s, nodes_.back().time_s);
@@ -114,6 +126,7 @@ bool DelayedKalmanObserver::update_position(double capture_time_s, double positi
   }
   if (!measurement_update(state, covariance, position_m, variance)) {
     ++rejected_measurements_;
+    last_update_reason_ = "innovation_gate_rejected";
     return false;
   }
 
@@ -140,6 +153,9 @@ bool DelayedKalmanObserver::update_position(double capture_time_s, double positi
     nodes_[replay].covariance = covariance;
   }
   ++accepted_measurements_;
+  last_update_reason_ = status == VisionStatus::Predicted
+                            ? "accepted_predicted"
+                            : "accepted_measured";
   return true;
 }
 

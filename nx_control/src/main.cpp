@@ -13,6 +13,7 @@
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <iomanip>
 #include <limits>
@@ -47,6 +48,8 @@ struct Options {
   std::uint16_t vision_port = 29001;
   int baud = 921600;
   std::string log = "logs/nx-control.csv";
+  std::string task_log_dir;
+  bool task_logs_enabled = true;
   std::string state_file = "state/tube-control-v3.seq";
   std::string command_socket = "/tmp/ball_nx_control.sock";
   std::uint32_t start_command_id = 1U;
@@ -141,6 +144,8 @@ Options parse_options(int argc, char** argv) {
     else if (argument == "--vision-port") options.vision_port = static_cast<std::uint16_t>(std::stoul(value()));
     else if (argument == "--baud") options.baud = std::stoi(value());
     else if (argument == "--log") options.log = value();
+    else if (argument == "--task-log-dir") options.task_log_dir = value();
+    else if (argument == "--no-task-logs") options.task_logs_enabled = false;
     else if (argument == "--state-file") options.state_file = value();
     else if (argument == "--command-socket") options.command_socket = value();
     else if (argument == "--start-command-id") {
@@ -169,7 +174,8 @@ Options parse_options(int argc, char** argv) {
       std::cout << "ball_nx_control [--config FILE] [--dmmc DEVICE] [--vision-port PORT]\n"
                    "  [--task 3|45|6|idle|static|center|target|auto] [--target-cm CM]\n"
                    "  [--wait-start | --key-start]  (--wait-start is unavailable for 45/6)\n"
-                   "  [--log CSV] [--state-file FILE] [--start-command-id ID]\n"
+                   "  [--log CSV] [--task-log-dir DIR | --no-task-logs]\n"
+                   "  [--state-file FILE] [--start-command-id ID]\n"
                    "  [--command-socket PATH]\n"
                    "  [--dry-run] [--max-seconds SECONDS]\n";
       std::exit(0);
@@ -195,6 +201,13 @@ Options parse_options(int argc, char** argv) {
   if (options.command_socket.empty()) {
     throw std::invalid_argument("--command-socket cannot be empty");
   }
+  if (options.task_logs_enabled && options.task_log_dir.empty() && !options.log.empty()) {
+    const std::filesystem::path combined_log(options.log);
+    const std::filesystem::path parent = combined_log.parent_path().empty()
+                                             ? std::filesystem::path(".")
+                                             : combined_log.parent_path();
+    options.task_log_dir = (parent / "tasks").string();
+  }
   return options;
 }
 
@@ -203,6 +216,9 @@ struct RuntimeTaskState {
   std::string control_mode;
   std::optional<double> target_cm;
   bool running = false;
+  std::uint64_t task_run_id = 0;
+  std::string log_file;
+  std::string log_error;
   std::string message;
 };
 
@@ -212,6 +228,8 @@ struct RuntimeCommandResult {
   bool applied = true;
   std::string error_code;
   std::string message;
+  bool task_started = false;
+  bool task_stopped = false;
 };
 
 std::string initial_task_name(nx_control::TaskMode mode) {
@@ -301,6 +319,7 @@ RuntimeCommandResult apply_runtime_command(
     runtime.running = false;
     runtime.message = "任务" + runtime.active_task + "已停止";
     result.message = runtime.message;
+    result.task_stopped = true;
     return result;
   }
   if (command.type == nx_control::RuntimeCommandType::Reset) {
@@ -312,6 +331,7 @@ RuntimeCommandResult apply_runtime_command(
     runtime.running = false;
     runtime.message = "已复位到任务5，等待开始";
     result.message = runtime.message;
+    result.task_stopped = true;
     return result;
   }
   if (command.type == nx_control::RuntimeCommandType::Start) {
@@ -325,6 +345,7 @@ RuntimeCommandResult apply_runtime_command(
     runtime.running = true;
     runtime.message = "任务" + runtime.active_task + "已开始";
     result.message = runtime.message;
+    result.task_started = true;
     return result;
   }
 
@@ -374,6 +395,7 @@ RuntimeCommandResult apply_runtime_command(
     runtime.message = "任务" + runtime.active_task + "已启动";
   }
   result.message = runtime.message;
+  result.task_started = true;
   return result;
 }
 
@@ -401,6 +423,9 @@ std::string runtime_response_json(
     json << "null";
   }
   json << ",\"running\":" << runtime.running
+       << ",\"task_run_id\":" << runtime.task_run_id
+       << ",\"log_file\":\"" << nx_control::json_escape(runtime.log_file) << "\""
+       << ",\"log_error\":\"" << nx_control::json_escape(runtime.log_error) << "\""
        << ",\"applied\":" << result.applied
        << ",\"controller_online\":true"
        << ",\"controller_state\":\"" << task_state_name(output.command.control_state) << "\""
@@ -453,11 +478,14 @@ int main(int argc, char** argv) {
       std::cerr << "keyboard start enabled: press d to start/restart the task\n";
     }
 
+    nx_control::RuntimeIoDiagnostics io_diagnostics;
     nx_control::UdpReceiver vision;
     const bool vision_udp_enabled = !options.dry_run;
     if (vision_udp_enabled && !vision.open(options.vision_bind, options.vision_port)) {
       throw std::runtime_error("cannot bind vision UDP: " + vision.last_error());
     }
+    io_diagnostics.vision_udp_open = vision_udp_enabled;
+    io_diagnostics.vision_udp_last_error = vision.last_error();
     std::unique_ptr<nx_control::PersistentSequence> persistent_sequence;
     if (!options.dry_run) {
       persistent_sequence = std::make_unique<nx_control::PersistentSequence>(
@@ -466,13 +494,74 @@ int main(int argc, char** argv) {
     }
     nx_control::SerialPort serial;
     double next_serial_retry = started;
-    if (!options.dry_run && !serial.open(options.dmmc, options.baud)) {
-      std::cerr << "DMMC serial waiting: " << serial.last_error() << '\n';
+    if (!options.dry_run) {
+      ++io_diagnostics.serial_connect_attempts;
+      if (serial.open(options.dmmc, options.baud)) {
+        ++io_diagnostics.serial_connections;
+      } else {
+        ++io_diagnostics.serial_connect_failures;
+        io_diagnostics.serial_last_error = serial.last_error();
+        std::cerr << "DMMC serial waiting: " << serial.last_error() << '\n';
+      }
     }
     nx_control::CsvLogger logger;
     if (!options.log.empty() && !logger.open(options.log)) {
       throw std::runtime_error("cannot open log: " + options.log);
     }
+    nx_control::CsvLogger task_logger;
+    std::uint64_t task_run_sequence = 0;
+    std::string pending_log_event = "sample";
+    auto start_task_log = [&](const std::string& trigger,
+                              const std::string& request_id,
+                              double now_s) {
+      const auto wall_now = std::chrono::system_clock::now();
+      const auto unix_time_ms = static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              wall_now.time_since_epoch())
+              .count());
+      nx_control::TaskLogContext context;
+      context.run_id = ++task_run_sequence;
+      context.task = runtime.active_task;
+      context.control_mode = runtime.control_mode;
+      context.target_m = runtime.target_cm.has_value()
+                             ? *runtime.target_cm / 100.0
+                             : std::numeric_limits<double>::quiet_NaN();
+      context.start_trigger = trigger;
+      context.request_id = request_id;
+      context.start_monotonic_s = now_s;
+      context.start_unix_s = static_cast<double>(unix_time_ms) / 1000.0;
+      runtime.task_run_id = context.run_id;
+      runtime.log_file.clear();
+      runtime.log_error.clear();
+      logger.set_task_context(context);
+      task_logger.close();
+      pending_log_event = "task_start";
+      if (!options.task_logs_enabled || options.task_log_dir.empty()) return;
+      const std::string path = nx_control::make_task_log_path(
+          options.task_log_dir, runtime.active_task, unix_time_ms,
+          context.run_id, static_cast<std::uint32_t>(::getpid()));
+      task_logger.set_task_context(context);
+      try {
+        if (!task_logger.open(path)) {
+          runtime.log_error = "cannot open task log: " + path;
+        }
+      } catch (const std::exception& error) {
+        runtime.log_error = error.what();
+      }
+      if (runtime.log_error.empty()) {
+        runtime.log_file = task_logger.path();
+        std::cerr << "task log started run_id=" << runtime.task_run_id
+                  << " task=" << runtime.active_task
+                  << " trigger=" << trigger
+                  << " path=" << runtime.log_file << '\n';
+      } else {
+        task_logger.close();
+        std::cerr << "TASK LOG ERROR run_id=" << runtime.task_run_id
+                  << " task=" << runtime.active_task
+                  << " error=" << runtime.log_error << '\n';
+      }
+    };
+    if (runtime.running) start_task_log("process_start", "", started);
 
     nx_control::protocol::StreamParser vision_parser;
     nx_control::protocol::Mc02StreamParser dmmc_parser;
@@ -493,35 +582,57 @@ int main(int argc, char** argv) {
         controller.start_task(now);
         runtime.running = true;
         runtime.message = "任务" + runtime.active_task + "已由按键开始";
+        start_task_log("keyboard_start", "", now);
         std::cerr << "task started/restarted by key d\n";
       }
       while (vision_udp_enabled) {
         const std::ptrdiff_t count = vision.read(buffer, sizeof(buffer));
         if (count <= 0) break;
+        ++io_diagnostics.vision_datagrams;
         for (const auto& frame : vision_parser.feed(buffer, static_cast<std::size_t>(count))) {
           const auto measurement = nx_control::protocol::decode_vision(frame, now);
-          if (measurement) controller.ingest_vision(*measurement);
+          if (measurement) {
+            ++io_diagnostics.vision_decoded_frames;
+            controller.ingest_vision(*measurement);
+          } else {
+            ++io_diagnostics.vision_decode_errors;
+          }
         }
       }
+      io_diagnostics.vision_udp_last_error = vision.last_error();
       if (serial.fd() >= 0) {
         while (true) {
+          const bool was_connected = serial.fd() >= 0;
           const std::ptrdiff_t count = serial.read(buffer, sizeof(buffer));
+          if (was_connected && serial.fd() < 0) {
+            ++io_diagnostics.serial_read_failures;
+            io_diagnostics.serial_last_error = serial.last_error();
+          }
           if (count <= 0) break;
           for (const auto& frame : dmmc_parser.feed(buffer, static_cast<std::size_t>(count))) {
             if (const auto status = nx_control::protocol::decode_tube_status(frame, now)) {
+              ++io_diagnostics.dmmc_decoded_status_frames;
               latest_tube = *status;
               have_tube = true;
               controller.ingest_tube_status(*status);
             } else if (const auto chassis = nx_control::protocol::decode_chassis_state(frame, now)) {
+              ++io_diagnostics.dmmc_decoded_chassis_frames;
               latest_chassis = *chassis;
               have_chassis = true;
               controller.ingest_chassis_state(*chassis);
+            } else {
+              ++io_diagnostics.dmmc_unknown_frames;
             }
           }
         }
       } else if (!options.dry_run && now >= next_serial_retry) {
+        ++io_diagnostics.serial_connect_attempts;
         if (serial.open(options.dmmc, options.baud)) {
+          ++io_diagnostics.serial_connections;
           std::cerr << "DMMC serial connected: " << options.dmmc << '\n';
+        } else {
+          ++io_diagnostics.serial_connect_failures;
+          io_diagnostics.serial_last_error = serial.last_error();
         }
         next_serial_retry = now + 1.0;
       }
@@ -533,6 +644,18 @@ int main(int argc, char** argv) {
           runtime_command_result = apply_runtime_command(
               nx_control::parse_runtime_command(runtime_command_payload), now,
               controller, runtime);
+          if (runtime_command_result->task_started) {
+            const std::string trigger =
+                runtime_command_result->command.type == nx_control::RuntimeCommandType::Task
+                    ? "socket_task_select"
+                    : "socket_start";
+            start_task_log(trigger, runtime_command_result->command.request_id, now);
+          } else if (runtime_command_result->task_stopped) {
+            pending_log_event = runtime_command_result->command.type ==
+                                        nx_control::RuntimeCommandType::Reset
+                                    ? "task_reset"
+                                    : "task_stop";
+          }
         }
         if (options.dry_run) {
           latest_tube.sequence = ++dry_sequence;
@@ -569,13 +692,35 @@ int main(int argc, char** argv) {
         const std::vector<std::uint8_t> packet =
             nx_control::protocol::encode_control_command(output.command);
         if (serial.fd() >= 0 && !serial.write_all(packet.data(), packet.size())) {
+          ++io_diagnostics.serial_write_failures;
+          io_diagnostics.serial_last_error = serial.last_error();
           std::cerr << "DMMC serial write failed after command_id="
                     << output.command.command_id << ": " << serial.last_error()
                     << "; ID will not be retried\n";
           serial.close();
         }
+        io_diagnostics.vision_crc_errors = vision_parser.crc_errors();
+        io_diagnostics.vision_length_errors = vision_parser.length_errors();
+        io_diagnostics.vision_discarded_bytes = vision_parser.discarded_bytes();
+        io_diagnostics.serial_connected = serial.fd() >= 0;
+        io_diagnostics.dmmc_crc_errors = dmmc_parser.crc_errors();
+        io_diagnostics.dmmc_length_errors = dmmc_parser.length_errors();
+        io_diagnostics.dmmc_discarded_bytes = dmmc_parser.discarded_bytes();
         logger.write(now, output, have_tube ? &latest_tube : nullptr,
-                     have_chassis ? &latest_chassis : nullptr);
+                     have_chassis ? &latest_chassis : nullptr,
+                     &io_diagnostics, pending_log_event);
+        task_logger.write(now, output, have_tube ? &latest_tube : nullptr,
+                          have_chassis ? &latest_chassis : nullptr,
+                          &io_diagnostics, pending_log_event);
+        const bool close_task_log = runtime_command_result.has_value() &&
+                                    runtime_command_result->task_stopped;
+        pending_log_event = "sample";
+        if (close_task_log) {
+          std::cerr << "task log stopped run_id=" << runtime.task_run_id
+                    << " task=" << runtime.active_task
+                    << " path=" << runtime.log_file << '\n';
+          task_logger.close();
+        }
         if (runtime_command_result.has_value()) {
           if (!command_server.reply(runtime_response_json(
                   *runtime_command_result, runtime, latest_output, config))) {

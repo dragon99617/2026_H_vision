@@ -101,6 +101,9 @@ Example response:
   "control_mode": "hold_target",
   "target_cm": -7.3,
   "running": true,
+  "task_run_id": 2,
+  "log_file": "/var/log/ball-nx/tasks/task-6/20260801_141530_044_run000002_pid23074.csv",
+  "log_error": "",
   "applied": true,
   "safety_latched": false,
   "message": "任务6已启动，目标位置 -7.3 cm"

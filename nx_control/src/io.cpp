@@ -15,8 +15,10 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <iomanip>
 #include <limits>
@@ -52,6 +54,29 @@ std::string trim(std::string value) {
   if (first == std::string::npos) return {};
   const auto last = value.find_last_not_of(" \t\r\n");
   return value.substr(first, last - first + 1);
+}
+
+std::string csv_string(const std::string& value) {
+  std::string escaped;
+  escaped.reserve(value.size() + 2U);
+  escaped.push_back('"');
+  for (const char character : value) {
+    if (character == '"') escaped.push_back('"');
+    escaped.push_back(character);
+  }
+  escaped.push_back('"');
+  return escaped;
+}
+
+std::string safe_path_component(const std::string& value) {
+  std::string result;
+  result.reserve(value.size());
+  for (const unsigned char character : value) {
+    result.push_back(std::isalnum(character) != 0 || character == '-' || character == '_'
+                         ? static_cast<char>(character)
+                         : '_');
+  }
+  return result.empty() ? "unknown" : result;
 }
 
 }  // namespace
@@ -418,12 +443,32 @@ bool SerialPort::write_all(const std::uint8_t* data, std::size_t size) {
   return true;
 }
 
+std::string make_task_log_path(const std::string& directory,
+                               const std::string& task,
+                               std::uint64_t unix_time_ms,
+                               std::uint64_t run_id,
+                               std::uint32_t process_id) {
+  const std::time_t seconds = static_cast<std::time_t>(unix_time_ms / 1000U);
+  std::tm local_time{};
+  localtime_r(&seconds, &local_time);
+  std::ostringstream filename;
+  filename << std::put_time(&local_time, "%Y%m%d_%H%M%S") << '_'
+           << std::setw(3) << std::setfill('0') << unix_time_ms % 1000U
+           << "_run" << std::setw(6) << std::setfill('0') << run_id
+           << "_pid" << process_id << ".csv";
+  return (std::filesystem::path(directory) /
+          ("task-" + safe_path_component(task)) / filename.str())
+      .string();
+}
+
 bool CsvLogger::open(const std::string& path) {
   if (path.empty()) return false;
+  close();
   const std::filesystem::path file(path);
   if (!file.parent_path().empty()) std::filesystem::create_directories(file.parent_path());
   stream_.open(file);
   if (!stream_) return false;
+  path_ = file.string();
   rows_ = 0;
   have_safety_state_ = false;
   last_safety_latched_ = false;
@@ -445,12 +490,56 @@ bool CsvLogger::open(const std::string& path) {
              "motor_torque_nm,a_actual_m_s2,a_ref_m_s2,v_actual_m_s,v_ref_m_s,jerk_ref_m_s3,"
              "track_error_m,track_quality,chassis_events,vision_age_ms,vision_capture_age_ms,"
              "chassis_age_ms,dmmc_age_ms,inner_angle_error_rad,inner_angle_warning,"
-             "slow,stop,tube_faults,motion_phase,track_segment,reason\n";
+             "slow,stop,tube_faults,motion_phase,track_segment,reason,"
+             "unix_time_s,task_elapsed_s,task_run_id,task,control_mode,task_target_m,"
+             "task_start_trigger,task_request_id,log_event,log_path,task_mode,nx_time_ms,"
+             "command_ttl_ms,theta_rate_limit_rad_s,task_feedback_valid,pid_active,"
+             "chassis_valid,dmmc_stale,vision_soft_hold,vision_hard_lost,"
+             "target_hold_deadband,projected_soft_boundary,actual_u_m_s2,requested_u_m_s2,"
+             "desired_theta_rad,theta_rate_limited,theta_angle_limited,vision_input_age_ms,"
+             "vision_have_frame,vision_frame_id,vision_frame_delta,vision_status,"
+             "vision_raw_position_m,vision_filtered_position_m,vision_ball_confidence,"
+             "vision_tube_confidence,vision_capture_time_ms,vision_has_capture_time,"
+             "vision_capture_time_s,vision_receive_time_s,vision_measurement_accepted,"
+             "vision_update_reason,vision_health_reason,vision_received_frames,"
+             "vision_accepted_frames,vision_status_lost_frames,vision_duplicate_frames,"
+             "vision_missing_frames,observer_rejected_measurements,"
+             "observer_too_old_measurements,observer_cov_xx,observer_cov_xv,observer_cov_xd,"
+             "observer_cov_vv,observer_cov_vd,observer_cov_dd,vision_udp_open,"
+             "vision_udp_last_error,vision_datagrams,vision_decoded_frames,"
+             "vision_decode_errors,vision_parser_crc_errors,vision_parser_length_errors,"
+             "vision_parser_discarded_bytes,dmmc_health_reason,dmmc_status_frames,"
+             "dmmc_duplicate_frames,dmmc_missing_frames,have_tube_status,tube_sequence,"
+             "dmmc_time_ms,theta_target_rad,theta_reference_rad,tube_state,tube_flags,"
+             "tube_can_age_ms,tube_usb_crc_errors,tube_control_age_ms,tube_sample_time_s,"
+             "tube_receive_time_s,serial_connected,serial_last_error,serial_connect_attempts,"
+             "serial_connect_failures,serial_connections,serial_read_failures,"
+             "serial_write_failures,dmmc_decoded_status_frames,dmmc_decoded_chassis_frames,"
+             "dmmc_unknown_frames,dmmc_parser_crc_errors,dmmc_parser_length_errors,"
+             "dmmc_parser_discarded_bytes,have_chassis_status,chassis_sequence,"
+             "chassis_time_ms,chassis_faults,chassis_ttl_ms,chassis_yaw_rate_rad_s,"
+             "chassis_sample_time_s,chassis_receive_time_s,chassis_status_frames,"
+             "chassis_duplicate_frames,chassis_missing_frames\n";
   return true;
 }
 
+void CsvLogger::close() {
+  if (stream_.is_open()) {
+    stream_.flush();
+    stream_.close();
+  }
+  path_.clear();
+}
+
+void CsvLogger::write(double now_s, const ControlOutput& output,
+                      const TubeStatus* tube, const ChassisState* chassis) {
+  write(now_s, output, tube, chassis, nullptr, "sample");
+}
+
 void CsvLogger::write(double now_s, const ControlOutput& output, const TubeStatus* tube,
-                      const ChassisState* chassis) {
+                      const ChassisState* chassis,
+                      const RuntimeIoDiagnostics* io,
+                      const std::string& event) {
   if (!stream_) return;
   const std::uint8_t wire_control_state =
       protocol::control_state_to_mc02(output.command.control_state);
@@ -461,7 +550,7 @@ void CsvLogger::write(double now_s, const ControlOutput& output, const TubeStatu
           << ',' << (tube ? static_cast<int>(tube->state) : -1)
           << ',' << (output.safety_latched ? 1 : 0)
           << ',' << output.safety_event_id
-          << ',' << output.last_stop_reason
+          << ',' << csv_string(output.last_stop_reason)
           << ',' << output.task3_stage
           << ',' << output.reference.position_m
           << ',' << output.reference.velocity_m_s
@@ -510,7 +599,118 @@ void CsvLogger::write(double now_s, const ControlOutput& output, const TubeStatu
           << (tube ? tube->faults : 0) << ','
           << (chassis ? static_cast<int>(chassis->motion_phase) : 0) << ','
           << (chassis ? static_cast<int>(chassis->track_segment) : 0) << ','
-          << output.reason << '\n';
+          << csv_string(output.reason);
+  const double task_elapsed_s = context_.run_id != 0
+                                    ? std::max(0.0, now_s - context_.start_monotonic_s)
+                                    : 0.0;
+  const double unix_time_s = context_.run_id != 0
+                                 ? context_.start_unix_s + task_elapsed_s
+                                 : 0.0;
+  stream_ << ',' << unix_time_s
+          << ',' << task_elapsed_s
+          << ',' << context_.run_id
+          << ',' << csv_string(context_.task)
+          << ',' << csv_string(context_.control_mode)
+          << ',' << context_.target_m
+          << ',' << csv_string(context_.start_trigger)
+          << ',' << csv_string(context_.request_id)
+          << ',' << csv_string(event)
+          << ',' << csv_string(path_)
+          << ',' << static_cast<int>(output.task_mode)
+          << ',' << output.command.nx_time_ms
+          << ',' << output.command.ttl_ms
+          << ',' << output.command.theta_rate_limit_rad_s
+          << ',' << (output.task_feedback_valid ? 1 : 0)
+          << ',' << (output.pid_active ? 1 : 0)
+          << ',' << (output.chassis_valid ? 1 : 0)
+          << ',' << (output.dmmc_stale ? 1 : 0)
+          << ',' << (output.vision_soft_hold ? 1 : 0)
+          << ',' << (output.vision_hard_lost ? 1 : 0)
+          << ',' << (output.target_hold_deadband ? 1 : 0)
+          << ',' << (output.projected_soft_boundary ? 1 : 0)
+          << ',' << output.actual_u_m_s2
+          << ',' << output.requested_u_m_s2
+          << ',' << output.desired_theta_rad
+          << ',' << (output.theta_rate_limited ? 1 : 0)
+          << ',' << (output.theta_angle_limited ? 1 : 0)
+          << ',' << output.vision_input_age_ms
+          << ',' << (output.have_vision ? 1 : 0)
+          << ',' << output.latest_vision.frame_id
+          << ',' << output.vision_frame_delta
+          << ',' << static_cast<int>(output.latest_vision.status)
+          << ',' << output.vision_raw_position_m
+          << ',' << output.latest_vision.position_m
+          << ',' << output.latest_vision.ball_confidence
+          << ',' << output.latest_vision.tube_confidence
+          << ',' << output.latest_vision.capture_time_ms
+          << ',' << (output.latest_vision.has_capture_time ? 1 : 0)
+          << ',' << output.latest_vision.capture_time_s
+          << ',' << output.latest_vision.receive_time_s
+          << ',' << (output.vision_measurement_accepted ? 1 : 0)
+          << ',' << csv_string(output.vision_update_reason)
+          << ',' << csv_string(output.vision_health_reason)
+          << ',' << output.vision_received_frames
+          << ',' << output.vision_accepted_frames
+          << ',' << output.vision_status_lost_frames
+          << ',' << output.vision_duplicate_frames
+          << ',' << output.vision_missing_frames
+          << ',' << output.observer_rejected_measurements
+          << ',' << output.observer_too_old_measurements
+          << ',' << output.observer_cov_xx
+          << ',' << output.observer_cov_xv
+          << ',' << output.observer_cov_xd
+          << ',' << output.observer_cov_vv
+          << ',' << output.observer_cov_vd
+          << ',' << output.observer_cov_dd
+          << ',' << (io && io->vision_udp_open ? 1 : 0)
+          << ',' << csv_string(io ? io->vision_udp_last_error : std::string{})
+          << ',' << (io ? io->vision_datagrams : 0)
+          << ',' << (io ? io->vision_decoded_frames : 0)
+          << ',' << (io ? io->vision_decode_errors : 0)
+          << ',' << (io ? io->vision_crc_errors : 0)
+          << ',' << (io ? io->vision_length_errors : 0)
+          << ',' << (io ? io->vision_discarded_bytes : 0)
+          << ',' << csv_string(output.dmmc_health_reason)
+          << ',' << output.dmmc_status_frames
+          << ',' << output.dmmc_duplicate_frames
+          << ',' << output.dmmc_missing_frames
+          << ',' << (tube ? 1 : 0)
+          << ',' << (tube ? tube->sequence : 0)
+          << ',' << (tube ? tube->dmmc_time_ms : 0)
+          << ',' << (tube ? tube->theta_target_rad : 0.0)
+          << ',' << (tube ? tube->theta_reference_rad : 0.0)
+          << ',' << (tube ? static_cast<int>(tube->state) : -1)
+          << ',' << (tube ? static_cast<int>(tube->flags) : 0)
+          << ',' << (tube ? tube->can_age_ms : 0)
+          << ',' << (tube ? tube->usb_crc_errors : 0)
+          << ',' << (tube ? tube->control_age_ms : 0)
+          << ',' << (tube ? tube->sample_time_s : 0.0)
+          << ',' << (tube ? tube->receive_time_s : 0.0)
+          << ',' << (io && io->serial_connected ? 1 : 0)
+          << ',' << csv_string(io ? io->serial_last_error : std::string{})
+          << ',' << (io ? io->serial_connect_attempts : 0)
+          << ',' << (io ? io->serial_connect_failures : 0)
+          << ',' << (io ? io->serial_connections : 0)
+          << ',' << (io ? io->serial_read_failures : 0)
+          << ',' << (io ? io->serial_write_failures : 0)
+          << ',' << (io ? io->dmmc_decoded_status_frames : 0)
+          << ',' << (io ? io->dmmc_decoded_chassis_frames : 0)
+          << ',' << (io ? io->dmmc_unknown_frames : 0)
+          << ',' << (io ? io->dmmc_crc_errors : 0)
+          << ',' << (io ? io->dmmc_length_errors : 0)
+          << ',' << (io ? io->dmmc_discarded_bytes : 0)
+          << ',' << (chassis ? 1 : 0)
+          << ',' << (chassis ? chassis->sequence : 0)
+          << ',' << (chassis ? chassis->chassis_time_ms : 0)
+          << ',' << (chassis ? chassis->faults : 0)
+          << ',' << (chassis ? chassis->ttl_ms : 0)
+          << ',' << (chassis ? chassis->yaw_rate_rad_s : 0.0)
+          << ',' << (chassis ? chassis->sample_time_s : 0.0)
+          << ',' << (chassis ? chassis->receive_time_s : 0.0)
+          << ',' << output.chassis_status_frames
+          << ',' << output.chassis_duplicate_frames
+          << ',' << output.chassis_missing_frames
+          << '\n';
   const bool safety_transition =
       !have_safety_state_ || output.safety_latched != last_safety_latched_ ||
       output.safety_event_id != last_safety_event_id_ ||
@@ -521,7 +721,7 @@ void CsvLogger::write(double now_s, const ControlOutput& output, const TubeStatu
   last_safety_event_id_ = output.safety_event_id;
   last_wire_control_state_ = wire_control_state;
   ++rows_;
-  if (safety_transition || rows_ % 50 == 0) stream_.flush();
+  if (event != "sample" || safety_transition || rows_ % 50 == 0) stream_.flush();
 }
 
 }  // namespace nx_control

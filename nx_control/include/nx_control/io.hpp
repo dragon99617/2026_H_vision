@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <limits>
 #include <string>
 
 namespace nx_control {
@@ -72,14 +73,64 @@ class SerialPort {
   std::string last_error_;
 };
 
+struct TaskLogContext {
+  std::uint64_t run_id = 0;
+  std::string task;
+  std::string control_mode;
+  double target_m = std::numeric_limits<double>::quiet_NaN();
+  std::string start_trigger;
+  std::string request_id;
+  double start_monotonic_s = 0.0;
+  double start_unix_s = 0.0;
+};
+
+struct RuntimeIoDiagnostics {
+  bool vision_udp_open = false;
+  std::string vision_udp_last_error;
+  std::uint64_t vision_datagrams = 0;
+  std::uint64_t vision_decoded_frames = 0;
+  std::uint64_t vision_decode_errors = 0;
+  std::uint64_t vision_crc_errors = 0;
+  std::uint64_t vision_length_errors = 0;
+  std::uint64_t vision_discarded_bytes = 0;
+  bool serial_connected = false;
+  std::string serial_last_error;
+  std::uint64_t serial_connect_attempts = 0;
+  std::uint64_t serial_connect_failures = 0;
+  std::uint64_t serial_connections = 0;
+  std::uint64_t serial_read_failures = 0;
+  std::uint64_t serial_write_failures = 0;
+  std::uint64_t dmmc_decoded_status_frames = 0;
+  std::uint64_t dmmc_decoded_chassis_frames = 0;
+  std::uint64_t dmmc_unknown_frames = 0;
+  std::uint64_t dmmc_crc_errors = 0;
+  std::uint64_t dmmc_length_errors = 0;
+  std::uint64_t dmmc_discarded_bytes = 0;
+};
+
+std::string make_task_log_path(const std::string& directory,
+                               const std::string& task,
+                               std::uint64_t unix_time_ms,
+                               std::uint64_t run_id,
+                               std::uint32_t process_id);
+
 class CsvLogger {
  public:
   bool open(const std::string& path);
+  void close();
+  void set_task_context(const TaskLogContext& context) { context_ = context; }
+  const std::string& path() const { return path_; }
+  bool is_open() const { return stream_.is_open(); }
   void write(double now_s, const ControlOutput& output, const TubeStatus* tube,
              const ChassisState* chassis);
+  void write(double now_s, const ControlOutput& output, const TubeStatus* tube,
+             const ChassisState* chassis, const RuntimeIoDiagnostics* io,
+             const std::string& event);
 
  private:
   std::ofstream stream_;
+  std::string path_;
+  TaskLogContext context_;
   std::size_t rows_ = 0;
   bool have_safety_state_ = false;
   bool last_safety_latched_ = false;

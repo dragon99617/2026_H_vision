@@ -857,7 +857,9 @@ void test_controller_safety() {
             output.safety_event_id == 1U &&
             output.command.control_state == nx_control::TaskState::Safe &&
             (output.command.flags & 0x08U) != 0U &&
-            output.last_stop_reason == "vision_stale",
+            output.last_stop_reason == "vision_lost:vision_packet_stale" &&
+            output.vision_hard_lost &&
+            output.vision_health_reason == "vision_packet_stale",
         "vision loss beyond 250 ms enters latched SAFE");
 
   ingest_feedback(5U, 10.43);
@@ -997,6 +999,75 @@ void test_controller_safety() {
             output.command.control_state == nx_control::TaskState::StandbyHold &&
             output.reason == "vision_soft_hold",
         "predicted soft-boundary crossing during vision loss remains a non-latching HOLD");
+}
+
+void test_controller_lost_diagnostics() {
+  nx_control::ControlConfig config;
+  nx_control::NxController controller(config);
+  controller.reset(200.0);
+  controller.configure_task(nx_control::TaskMode::HoldCenter, 0.0, true);
+
+  auto ingest_tube = [&](std::uint32_t sequence, double now_s,
+                         std::uint32_t faults = 0) {
+    nx_control::TubeStatus tube;
+    tube.sequence = sequence;
+    tube.dmmc_time_ms = static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
+    tube.receive_time_s = now_s;
+    tube.faults = faults;
+    controller.ingest_tube_status(tube);
+  };
+  auto vision = [&](std::uint32_t frame_id, double now_s,
+                    nx_control::VisionStatus status, double confidence,
+                    double position_m = 0.0) {
+    nx_control::VisionMeasurement measurement;
+    measurement.frame_id = frame_id;
+    measurement.status = status;
+    measurement.position_m = position_m;
+    measurement.ball_confidence = measurement.tube_confidence = confidence;
+    measurement.capture_time_ms =
+        static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
+    measurement.has_capture_time = true;
+    measurement.receive_time_s = now_s;
+    controller.ingest_vision(measurement);
+  };
+
+  ingest_tube(1, 200.0);
+  vision(1, 200.0, nx_control::VisionStatus::Measured, 1.0);
+  auto output = controller.tick(200.0);
+  check(output.vision_health_reason == "ok_measured" &&
+            output.vision_measurement_accepted &&
+            output.dmmc_health_reason == "ok",
+        "diagnostics identify healthy measured vision and DMMC feedback");
+
+  ingest_tube(2, 200.02);
+  vision(2, 200.02, nx_control::VisionStatus::Lost, 0.0);
+  output = controller.tick(200.02);
+  check(output.vision_health_reason == "upstream_reported_lost" &&
+            output.vision_update_reason == "upstream_reported_lost" &&
+            output.vision_status_lost_frames == 1,
+        "diagnostics distinguish an upstream tracker LOST report");
+
+  ingest_tube(4, 200.04);
+  vision(4, 200.04, nx_control::VisionStatus::Predicted, 0.1);
+  output = controller.tick(200.04);
+  check(output.vision_health_reason == "predicted_confidence_too_low" &&
+            output.vision_missing_frames == 1 && output.dmmc_missing_frames == 1,
+        "diagnostics identify low-confidence prediction and sequence gaps");
+
+  vision(4, 200.05, nx_control::VisionStatus::Predicted, 0.9);
+  output = controller.tick(200.05);
+  check(output.vision_health_reason == "duplicate_or_out_of_order_frame" &&
+            output.vision_duplicate_frames == 1,
+        "diagnostics identify duplicate or out-of-order vision frames");
+
+  controller.start_task(200.06);
+  ingest_tube(5, 200.06, 0x20U);
+  vision(5, 200.06, nx_control::VisionStatus::Measured, 1.0);
+  output = controller.tick(200.06);
+  check(output.dmmc_health_reason == "dmmc_reported_fault" &&
+            output.dmmc_stale &&
+            output.last_stop_reason == "dmmc_lost:dmmc_reported_fault",
+        "diagnostics distinguish a DMMC-reported fault from stale status");
 }
 
 void test_controller_power_on_idle_is_disabled_without_inputs() {
@@ -1622,6 +1693,16 @@ void test_csv_task3_diagnostics() {
 
   {
     nx_control::CsvLogger logger;
+    nx_control::TaskLogContext context;
+    context.run_id = 7;
+    context.task = "6";
+    context.control_mode = "hold_target";
+    context.target_m = -0.073;
+    context.start_trigger = "socket_task_select";
+    context.request_id = "request,\"quoted\"";
+    context.start_monotonic_s = 0.5;
+    context.start_unix_s = 1234.0;
+    logger.set_task_context(context);
     check(logger.open(path), "open temporary Task 3 CSV");
     nx_control::ControlOutput output;
     output.task3_stage = 1;
@@ -1633,9 +1714,14 @@ void test_csv_task3_diagnostics() {
     output.friction_mode = nx_control::FrictionMode::RollingNegative;
     output.friction_direction = -1;
     output.vision_capture_age_ms = 34.5;
+    output.vision_health_reason = "upstream_reported_lost";
+    output.dmmc_health_reason = "dmmc_status_stale";
     nx_control::TubeStatus tube;
     tube.theta_actual_rad = -0.01;
-    logger.write(1.0, output, &tube, nullptr);
+    nx_control::RuntimeIoDiagnostics io;
+    io.serial_last_error = "I/O, disconnected";
+    io.vision_crc_errors = 3;
+    logger.write(1.0, output, &tube, nullptr, &io, "task_start");
   }
 
   std::ifstream stream(path);
@@ -1643,7 +1729,7 @@ void test_csv_task3_diagnostics() {
   std::string row;
   std::getline(stream, header);
   std::getline(stream, row);
-  const std::array<const char*, 32> required_fields{
+  const std::vector<const char*> required_fields{
       "task3_stage",       "planned_x_m",       "planned_v_m_s",
       "planned_a_m_s2",    "settle_position_ok", "settle_velocity_ok",
       "settle_theta_ok",    "settle_elapsed_ms", "task3_early_braking",
@@ -1656,7 +1742,11 @@ void test_csv_task3_diagnostics() {
       "pid_p_m_s2", "pid_i_m_s2", "pid_d_m_s2", "pid_ff_m_s2",
       "pid_disturbance_m_s2", "pid_unsaturated_m_s2", "pid_applied_m_s2",
       "pid_integrator_frozen", "pid_integral_limited", "pid_saturated",
-      "inner_angle_error_rad"};
+      "inner_angle_error_rad", "task_run_id", "task_start_trigger",
+      "vision_input_age_ms", "vision_raw_position_m", "vision_update_reason",
+      "vision_health_reason", "vision_parser_crc_errors", "dmmc_health_reason",
+      "serial_connected", "serial_last_error", "dmmc_parser_crc_errors",
+      "tube_sequence", "chassis_sequence"};
   bool fields_present = true;
   for (const char* field : required_fields) {
     fields_present = fields_present &&
@@ -1666,6 +1756,14 @@ void test_csv_task3_diagnostics() {
         "control CSV contains every required Task 3 planning, settle, and friction field");
   check(row.find("ROLLING_NEGATIVE,-1") != std::string::npos,
         "control CSV writes human-readable friction mode and direction");
+  check(row.find("\"request,\"\"quoted\"\"\"") != std::string::npos &&
+            row.find("\"I/O, disconnected\"") != std::string::npos,
+        "control CSV safely quotes diagnostic strings containing commas and quotes");
+  const std::string task_path = nx_control::make_task_log_path(
+      "/var/log/ball-nx/tasks", "6/unsafe", 1000, 7, 42);
+  check(task_path.find("/task-6_unsafe/") != std::string::npos &&
+            task_path.find("_run000007_pid42.csv") != std::string::npos,
+        "per-task log paths use separate sanitized task directories and unique run IDs");
   ::unlink(path);
 }
 
@@ -1683,6 +1781,7 @@ int main() {
   test_task_manager();
   test_task3_friction_compensator();
   test_controller_safety();
+  test_controller_lost_diagnostics();
   test_controller_power_on_idle_is_disabled_without_inputs();
   test_controller_angle_limit();
   test_inner_angle_watchdog();

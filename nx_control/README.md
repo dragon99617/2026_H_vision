@@ -125,8 +125,22 @@ python3 run_rgb.py --no-serial --position-mode rgb-contour --protocol tube-v3 \
 网页运行时切换任务使用本机 Unix 数据报套接字，默认路径为
 `/tmp/ball_nx_control.sock`，可用 `--command-socket`覆盖。网页请求在下一个50 Hz
 控制周期中应用，支持任务3/4/5/6、开始、停止、复位和状态查询，并返回实际任务、
-目标、视觉/DMMC健康状态及SAFE原因。该接口只允许本机进程访问，不对Wi-Fi直接
+目标、视觉/DMMC健康状态、SAFE原因、`task_run_id`及本次`log_file`。该接口只允许本机进程访问，不对Wi-Fi直接
 开放；HTTP到本机套接字的转换由 `agx_web_test/tools/snapshot_server.py`完成。
+
+只要启用了`--log`，每次进程立即启动、网页选择task、网页点击“开始”或键盘重启
+都会新建一份独立任务日志。默认目录为总日志同级的`tasks/`，并按task分目录：
+
+```text
+/var/log/ball-nx/live.csv
+/var/log/ball-nx/tasks/task-3/20260801_141118_591_run000001_pid23074.csv
+/var/log/ball-nx/tasks/task-6/20260801_141530_044_run000002_pid23074.csv
+```
+
+文件名包含本地墙钟时间、进程内run编号和PID，服务重启也不会复用普通文件名。
+停止/复位的最终控制周期写入后关闭文件。可用`--task-log-dir DIR`改目录，或用
+`--no-task-logs`仅保留总日志。systemd正式配置的`--log /var/log/ball-nx/live.csv`
+会自动把分task日志写到`/var/log/ball-nx/tasks/`。
 
 任务参数：
 
@@ -221,6 +235,32 @@ python3 tools/analyze_log.py replay-output.csv --json replay-metrics.json
 积分限幅、输出饱和、`inner_angle_error_rad`和内环告警。日志还直接记录`wire_control_state`、`wire_flags`、
 `dmmc_controller_state`、`safety_latched`、`safety_event_id`和
 `last_stop_reason`；安全锁存/解除行会立即flush，不依赖每秒一次的终端摘要。
+
+每行还带有`task_run_id/task/task_elapsed_s/log_event`，并完整记录最近一帧视觉原始
+位置与滤波位置、状态、置信度、采集/接收时间、帧号差、缺帧/重复帧累计数、
+观测器接受/拒绝原因与协方差，以及视觉UDP解析器的CRC、长度、丢弃字节和解码
+错误。`vision_health_reason`会明确区分：
+
+- `no_vision_packet`：task启动后从未收到视觉包；
+- `vision_packet_stale`：发送端、UDP链路或视觉进程停更；
+- `upstream_reported_lost`：视觉跟踪器仍在发包，但明确上报LOST；
+- `predicted_confidence_too_low` / `invalid_confidence`：置信度不满足观测条件；
+- `capture_time_too_old` / `innovation_gate_rejected`：观测器因时延或跳点拒绝；
+- `duplicate_or_out_of_order_frame`：帧号重复或乱序。
+
+DMMC部分记录串口连接状态及最后错误、打开/重连/读/写失败累计数、协议CRC/长度
+错误、状态序号缺口，以及`TubeStatus`全部字段。`dmmc_health_reason`区分
+`no_dmmc_status`、`dmmc_status_stale`和`dmmc_reported_fault`；结合
+`serial_connected/serial_last_error`即可继续判断是设备未连接、USB串口断开、
+协议损坏、状态停更还是MC02主动上报fault。安全原因`last_stop_reason`也会保留
+`vision_lost:<具体原因>`或`dmmc_lost:<具体原因>`。
+
+`tools/analyze_log.py`会汇总正负向过冲、视觉/DMMC各原因的样本数及上述传输错误
+计数器的首值、末值和本次增量：
+
+```bash
+python3 tools/analyze_log.py /var/log/ball-nx/tasks/task-3/具体文件.csv
+```
 
 ## 上车前必须实测的参数
 

@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <deque>
+#include <string>
 
 namespace nx_control {
 
@@ -24,6 +25,7 @@ class DelayedKalmanObserver {
   std::uint64_t accepted_measurements() const { return accepted_measurements_; }
   std::uint64_t rejected_measurements() const { return rejected_measurements_; }
   std::uint64_t too_old_measurements() const { return too_old_measurements_; }
+  const std::string& last_update_reason() const { return last_update_reason_; }
 
  private:
   struct Node {
@@ -45,6 +47,7 @@ class DelayedKalmanObserver {
   std::uint64_t accepted_measurements_ = 0;
   std::uint64_t rejected_measurements_ = 0;
   std::uint64_t too_old_measurements_ = 0;
+  std::string last_update_reason_ = "no_measurement";
 };
 
 class ChassisSynchronizer {

@@ -72,6 +72,15 @@ void NxController::reset(double now_s) {
   last_vision_receive_s_ = last_accepted_vision_s_ = -1.0;
   have_vision_frame_ = have_chassis_sequence_ = false;
   have_tube_status_ = false;
+  latest_vision_ = VisionMeasurement{};
+  latest_raw_vision_position_m_ = 0.0;
+  latest_vision_frame_delta_ = 0;
+  latest_vision_measurement_accepted_ = false;
+  latest_vision_update_reason_ = "no_vision_packet";
+  vision_received_frames_ = vision_accepted_frames_ = 0;
+  vision_status_lost_frames_ = vision_duplicate_frames_ = vision_missing_frames_ = 0;
+  dmmc_status_frames_ = dmmc_duplicate_frames_ = dmmc_missing_frames_ = 0;
+  chassis_status_frames_ = chassis_duplicate_frames_ = chassis_missing_frames_ = 0;
   vision_clock_.reset();
   dmmc_clock_.reset();
   chassis_clock_.reset();
@@ -100,12 +109,28 @@ void NxController::reset(double now_s) {
 }
 
 void NxController::ingest_vision(VisionMeasurement measurement) {
+  ++vision_received_frames_;
+  latest_raw_vision_position_m_ = measurement.position_m;
+  latest_vision_measurement_accepted_ = false;
   const bool had_previous_frame = have_vision_frame_;
   const std::uint32_t previous_frame_id = last_vision_frame_id_;
+  latest_vision_frame_delta_ = had_previous_frame
+                                   ? static_cast<std::int32_t>(measurement.frame_id -
+                                                               previous_frame_id)
+                                   : 0;
   if (had_previous_frame && !sequence_is_newer(measurement.frame_id, previous_frame_id)) {
-    if (measurement.receive_time_s - last_vision_receive_s_ <= config_.vision_loss_safe_s) return;
+    if (measurement.receive_time_s - last_vision_receive_s_ <= config_.vision_loss_safe_s) {
+      ++vision_duplicate_frames_;
+      latest_vision_ = measurement;
+      latest_vision_update_reason_ = "duplicate_or_out_of_order_frame";
+      return;
+    }
     v2_clock_initialized_ = false;
     visual_position_filter_initialized_ = false;
+  }
+  if (latest_vision_frame_delta_ > 1) {
+    vision_missing_frames_ +=
+        static_cast<std::uint64_t>(latest_vision_frame_delta_ - 1);
   }
   have_vision_frame_ = true;
   last_vision_receive_s_ = measurement.receive_time_s;
@@ -138,6 +163,7 @@ void NxController::ingest_vision(VisionMeasurement measurement) {
   // Bypass smoothing near the soft boundary so slowdown decisions see the
   // measured position without additional filter lag.
   const double raw_position_m = measurement.position_m;
+  if (measurement.status == VisionStatus::Lost) ++vision_status_lost_frames_;
   const bool visual_position_valid =
       measurement.status == VisionStatus::Measured &&
       measurement.ball_confidence * measurement.tube_confidence >= 0.30;
@@ -178,17 +204,33 @@ void NxController::ingest_vision(VisionMeasurement measurement) {
         chassis_acceleration_for_control(measurement.receive_time_s);
     observer_.predict(measurement.capture_time_s, actual_u, acceleration);
   }
-  if (observer_.update_position(measurement.capture_time_s, measurement.position_m,
-                                measurement.ball_confidence, measurement.tube_confidence,
-                                measurement.status)) {
+  latest_vision_measurement_accepted_ = observer_.update_position(
+      measurement.capture_time_s, measurement.position_m,
+      measurement.ball_confidence, measurement.tube_confidence,
+      measurement.status);
+  latest_vision_update_reason_ = observer_.last_update_reason();
+  latest_vision_ = measurement;
+  if (latest_vision_measurement_accepted_) {
+    ++vision_accepted_frames_;
     last_accepted_vision_s_ = measurement.receive_time_s;
   }
 }
 
 void NxController::ingest_tube_status(const TubeStatus& status) {
+  ++dmmc_status_frames_;
   if (have_tube_status_ && !sequence_is_newer(status.sequence, last_tube_sequence_)) {
-    if (status.receive_time_s - tube_status_.receive_time_s <= config_.dmmc_stale_s) return;
+    if (status.receive_time_s - tube_status_.receive_time_s <= config_.dmmc_stale_s) {
+      ++dmmc_duplicate_frames_;
+      return;
+    }
     dmmc_clock_.reset();
+  }
+  if (have_tube_status_) {
+    const std::int32_t sequence_delta =
+        static_cast<std::int32_t>(status.sequence - last_tube_sequence_);
+    if (sequence_delta > 1) {
+      dmmc_missing_frames_ += static_cast<std::uint64_t>(sequence_delta - 1);
+    }
   }
   TubeStatus synchronized = status;
   synchronized.sample_time_s =
@@ -205,11 +247,20 @@ void NxController::ingest_tube_status(const TubeStatus& status) {
 }
 
 void NxController::ingest_chassis_state(const ChassisState& state) {
+  ++chassis_status_frames_;
   if (have_chassis_sequence_ && !sequence_is_newer(state.sequence, last_chassis_sequence_)) {
     if (state.receive_time_s - chassis_sync_.latest().receive_time_s <= config_.chassis_stale_s) {
+      ++chassis_duplicate_frames_;
       return;
     }
     chassis_clock_.reset();
+  }
+  if (have_chassis_sequence_) {
+    const std::int32_t sequence_delta =
+        static_cast<std::int32_t>(state.sequence - last_chassis_sequence_);
+    if (sequence_delta > 1) {
+      chassis_missing_frames_ += static_cast<std::uint64_t>(sequence_delta - 1);
+    }
   }
   ChassisState synchronized = state;
   synchronized.sample_time_s =
@@ -305,24 +356,83 @@ ControlOutput NxController::tick(double now_s,
   last_tick_s_ = now_s;
 
   ControlOutput output;
+  output.task_mode = task_manager_.mode();
   output.estimate = observer_.state();
   output.acceleration_used_m_s2 = chassis_acceleration;
+  output.actual_u_m_s2 = actual_u;
   output.vision_age_ms = last_accepted_vision_s_ >= 0.0
                              ? 1000.0 * std::max(0.0, now_s - last_accepted_vision_s_)
                              : std::numeric_limits<double>::infinity();
+  output.vision_input_age_ms = last_vision_receive_s_ >= 0.0
+                                   ? 1000.0 * std::max(0.0, now_s - last_vision_receive_s_)
+                                   : std::numeric_limits<double>::infinity();
   output.vision_capture_age_ms = latest_vision_capture_age_ms_;
   output.chassis_age_ms = 1000.0 * chassis_sync_.age_s(now_s);
   output.dmmc_age_ms = have_tube_status_
                            ? 1000.0 * std::max(0.0, now_s - tube_status_.receive_time_s)
                            : std::numeric_limits<double>::infinity();
+  output.have_vision = have_vision_frame_;
+  output.latest_vision = latest_vision_;
+  output.vision_raw_position_m = latest_raw_vision_position_m_;
+  output.vision_frame_delta = latest_vision_frame_delta_;
+  output.vision_measurement_accepted = latest_vision_measurement_accepted_;
+  output.vision_update_reason = latest_vision_update_reason_;
+  output.vision_received_frames = vision_received_frames_;
+  output.vision_accepted_frames = vision_accepted_frames_;
+  output.vision_status_lost_frames = vision_status_lost_frames_;
+  output.vision_duplicate_frames = vision_duplicate_frames_;
+  output.vision_missing_frames = vision_missing_frames_;
+  output.observer_rejected_measurements = observer_.rejected_measurements();
+  output.observer_too_old_measurements = observer_.too_old_measurements();
+  const Eigen::Matrix3d observer_covariance = observer_.covariance();
+  output.observer_cov_xx = observer_covariance(0, 0);
+  output.observer_cov_xv = observer_covariance(0, 1);
+  output.observer_cov_xd = observer_covariance(0, 2);
+  output.observer_cov_vv = observer_covariance(1, 1);
+  output.observer_cov_vd = observer_covariance(1, 2);
+  output.observer_cov_dd = observer_covariance(2, 2);
+  output.dmmc_status_frames = dmmc_status_frames_;
+  output.dmmc_duplicate_frames = dmmc_duplicate_frames_;
+  output.dmmc_missing_frames = dmmc_missing_frames_;
+  output.chassis_status_frames = chassis_status_frames_;
+  output.chassis_duplicate_frames = chassis_duplicate_frames_;
+  output.chassis_missing_frames = chassis_missing_frames_;
+
+  if (!have_vision_frame_) {
+    output.vision_health_reason = "no_vision_packet";
+  } else if (output.vision_input_age_ms > config_.vision_loss_hold_s * 1000.0) {
+    output.vision_health_reason = "vision_packet_stale";
+  } else if (latest_vision_.status == VisionStatus::Lost) {
+    output.vision_health_reason = "upstream_reported_lost";
+  } else if (!latest_vision_measurement_accepted_) {
+    output.vision_health_reason = latest_vision_update_reason_;
+  } else if (output.vision_age_ms > config_.vision_loss_hold_s * 1000.0) {
+    output.vision_health_reason = "accepted_measurement_stale";
+  } else {
+    output.vision_health_reason = latest_vision_.status == VisionStatus::Predicted
+                                      ? "ok_predicted"
+                                      : "ok_measured";
+  }
 
   const double vision_age_s = output.vision_age_ms / 1000.0;
   const bool dmmc_stale =
       !have_tube_status_ ||
       output.dmmc_age_ms > config_.dmmc_stale_s * 1000.0 ||
       tube_status_.faults != 0U;
+  output.chassis_valid = chassis_valid;
+  output.dmmc_stale = dmmc_stale;
+  if (!have_tube_status_) {
+    output.dmmc_health_reason = "no_dmmc_status";
+  } else if (tube_status_.faults != 0U) {
+    output.dmmc_health_reason = "dmmc_reported_fault";
+  } else if (output.dmmc_age_ms > config_.dmmc_stale_s * 1000.0) {
+    output.dmmc_health_reason = "dmmc_status_stale";
+  } else {
+    output.dmmc_health_reason = "ok";
+  }
   const bool task_feedback_valid =
       !dmmc_stale && vision_age_s <= config_.vision_loss_hold_s;
+  output.task_feedback_valid = task_feedback_valid;
   const ChassisState* chassis =
       !camera_feedback_only && chassis_valid ? &chassis_sync_.latest() : nullptr;
   output.reference =
@@ -347,20 +457,25 @@ ControlOutput NxController::tick(double now_s,
   const bool vision_hard_lost =
       task_safety_active && !contest3_waiting_for_start &&
       vision_age_s > config_.vision_loss_safe_s;
+  output.vision_soft_hold = vision_soft_hold;
+  output.vision_hard_lost = vision_hard_lost;
   const bool force_safe_feedforward =
       vision_soft_hold || vision_hard_lost || safety_latched_;
   if (vision_hard_lost) {
     output.request_stop = true;
-    output.reason = "vision_stale";
+    output.reason = "vision_lost:" + output.vision_health_reason;
   }
   if (task_safety_active && dmmc_stale) {
     output.request_stop = true;
-    output.reason = "dmmc_stale_or_fault";
+    const std::string dmmc_reason = "dmmc_lost:" + output.dmmc_health_reason;
+    output.reason = output.reason.empty() ? dmmc_reason
+                                          : output.reason + "+" + dmmc_reason;
   }
 
   const bool pid_active =
       !force_safe_feedforward && !dmmc_stale &&
       task_manager_.state() != TaskState::Idle;
+  output.pid_active = pid_active;
   if (!pid_active) pid_.reset();
   output.pid = pid_.calculate(output.estimate, output.reference,
                               chassis_acceleration,
@@ -388,6 +503,8 @@ ControlOutput NxController::tick(double now_s,
       hold_prediction_crosses_soft_boundary(
           output.estimate, actual_u, chassis_acceleration,
           config_.vision_loss_safe_s);
+  output.projected_soft_boundary = projected_soft_boundary;
+  output.target_hold_deadband = target_hold_deadband;
   if (!contest3_waiting_for_start &&
       (std::abs(output.estimate.position_m) >
            config_.position_soft_limit_m - 0.010 ||
@@ -553,6 +670,14 @@ ControlOutput NxController::tick(double now_s,
           ? 0.0
           : rate_limit_final_angle(desired_theta_rad,
                                    theta_rate_limit_rad_s);
+  output.requested_u_m_s2 = requested_u;
+  output.desired_theta_rad = desired_theta_rad;
+  output.theta_angle_limited =
+      !force_zero_command && std::abs(desired_theta_rad) > config_.theta_limit_rad;
+  output.theta_rate_limited =
+      !force_zero_command &&
+      std::abs(desired_theta_rad - previous_theta_command_rad_) >
+          theta_rate_limit_rad_s * config_.period_s + 1e-12;
 
   const double applied_dynamic_theta_rad =
       theta_command_rad - theta_bias_rad - theta_friction_rad;
