@@ -12,10 +12,10 @@ WorkingDirectory=@APP_ROOT@
 EnvironmentFile=/etc/ball-car/ball-car.env
 Environment=PYTHONUNBUFFERED=1
 UMask=0007
-ExecStart=/usr/bin/python3 @APP_ROOT@/run.py \
+ExecStart=/usr/bin/python3 @APP_ROOT@/run_rgb.py \
   --no-serial \
   --camera-backend sdk \
-  --position-mode rgbd \
+  --position-mode rgb-contour \
   --protocol tube-v3 \
   --control-udp 127.0.0.1:29001 \
   --web-host ${WEB_HOST} \

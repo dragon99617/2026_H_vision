@@ -8,9 +8,9 @@ machine connected to the camera runs this web service, and the phone opens that
 machine's IP address.
 
 > This is a standalone camera test tool. Do not autostart it together with the
-> production `run.py` RGB-D service because both processes would open the same
-> Orbbec. The installed-car service uses `run.py --web-port 8080`, which shares
-> the frame already owned by the inference runtime.
+> production `run_rgb.py` service because both processes would open the same
+> Orbbec. The installed-car service uses `run_rgb.py --web-port 8080`, which
+> shares the frame already owned by the inference runtime.
 
 ## Start
 

@@ -1,19 +1,14 @@
 # Xavier NX YOLO26s 墨绿色/白色半管三维小球位置
 
-当前默认功能已经升级为 RGB-D `tube-v2`：以 25.0 cm 开放半管中心为
-`0.00 cm`，图像右端为 `+12.50 cm`，输出球沿三维管轴的有符号厘米位置。
-厂家内参、畸变和深度到彩色外参均由 Gemini 336L 实时读取；管前后翘起时
-不再使用 RGB 像素比例。完整接线、采集、标定及验收流程见
-[`TUBE_RGBD.md`](TUBE_RGBD.md)。
-
-另外提供完全不读取深度的纯 RGB 轮廓投影版：
-[`TUBE_RGB.md`](TUBE_RGB.md)。它使用独立的 `debug_rgb.py`、`run_rgb.py`，
+当前装车默认使用完全不读取深度的纯 RGB 轮廓投影版：
+[`TUBE_RGB.md`](TUBE_RGB.md)。它使用 `debug_rgb.py`、`run_rgb.py`，
 把实时轮廓两端定义为 `-12.5/+12.5 cm`，将球心投影到二维管轴后线性换算，
-适合当前约 14 cm 的近距离安装。
+适合当前约 14 cm 的近距离安装。RGB-D 三维管轴模式仅保留用于离线诊断，
+说明见 [`TUBE_RGBD.md`](TUBE_RGBD.md)，不用于装车控制。
 
-本工程在 Jetson Xavier NX 上训练并部署 YOLO26s，读取奥比中光 Gemini
-336L 的 `1280×800@60 MJPEG` 彩色流和 `640×400@30` 深度流，默认输出
-半管轴向厘米位置；`--protocol pixel-v1` 可兼容旧的二维球心协议。
+本工程在 Jetson Xavier NX 上训练并部署 YOLO26s，装车时读取奥比中光 Gemini
+336L 的 `1280×800@60 MJPEG` 彩色流并输出半管轴向厘米位置；仅 RGB-D 诊断
+模式另外读取 `640×400@30` 深度流。`--protocol pixel-v1` 可兼容旧的二维球心协议。
 原始数据目录 `../data` 只读，所有生成数据、权重、Engine 和报告均保存在本工程。
 
 管道轮廓现支持墨绿色和原白色。默认 `--tube-color-mode auto` 优先墨绿色；
@@ -154,20 +149,20 @@ python3 debug_rgb.py
 无窗口，串口默认依次自动寻找 `/dev/ttyACM*`、`/dev/ttyUSB*`：
 
 ```bash
-python3 run.py
+python3 run_rgb.py
 ```
 
 无串口运行：
 
 ```bash
-python3 run.py --no-serial
+python3 run_rgb.py --no-serial
 ```
 
 装车时由同一个视觉进程共享最新相机帧并提供图传和任务按钮，避免网页进程
 第二次打开 Orbbec：
 
 ```bash
-python3 run.py --no-serial --protocol tube-v3 \
+python3 run_rgb.py --no-serial --position-mode rgb-contour --protocol tube-v3 \
   --control-udp 127.0.0.1:29001 \
   --web-host 0.0.0.0 --web-port 8080 \
   --web-control-socket /run/ball-nx/control.sock
@@ -177,11 +172,7 @@ python3 run.py --no-serial --protocol tube-v3 \
 [`deploy/README.md`](deploy/README.md)。正式装车不要同时运行独立的
 `snapshot_server.py`，否则它会与视觉进程争用同一台相机。
 
-纯 RGB 正式运行：
-
-```bash
-python3 run_rgb.py
-```
+正式运行统一使用 `run_rgb.py`；不要用 `run.py` 启动装车控制。
 
 常用参数：
 
@@ -287,11 +278,11 @@ CRC 覆盖字节 2–15（Version 至 Payload）。无球包的 X、Y、Confiden
 接入 336L 后分别生成候选 Engine 的 10 分钟实时报告：
 
 ```bash
-python3 run.py --engine models/ball_yolo26s_768x480_fp16.engine \
+python3 run_rgb.py --engine models/ball_yolo26s_768x480_fp16.engine \
   --no-serial --max-seconds 600 \
   --metrics-json artifacts/live_768x480.json
 
-python3 run.py --engine models/ball_yolo26s_640x416_fp16.engine \
+python3 run_rgb.py --engine models/ball_yolo26s_640x416_fp16.engine \
   --no-serial --max-seconds 600 \
   --metrics-json artifacts/live_640x416.json
 

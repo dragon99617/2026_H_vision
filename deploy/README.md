@@ -1,8 +1,10 @@
 # Ball Car Power-On Deployment
 
 This deployment makes the Jetson create its own Wi-Fi hotspot and start the
-controller, Orbbec RGB-D inference, shared preview and task HTTP API after every
-boot. Only `run.py` opens the camera; the web preview reuses its latest frame.
+controller, Orbbec RGB inference, shared preview and task HTTP API after every
+boot. Only `run_rgb.py` opens the camera; the web preview reuses its latest
+RGB frame. Production control uses the validated `rgb-contour` coordinate
+pipeline and does not depend on the unreliable tube depth fit.
 
 ## Safety and scope
 

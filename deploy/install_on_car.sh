@@ -36,7 +36,8 @@ fi
 id "$CAR_USER" >/dev/null 2>&1 || fail "Linux user does not exist: $CAR_USER"
 [ -x "$APP_ROOT/nx_control/build/ball_nx_control" ] || \
     fail "missing controller binary; build nx_control first"
-[ -f "$APP_ROOT/run.py" ] || fail "run.py not found below APP_ROOT=$APP_ROOT"
+[ -f "$APP_ROOT/run_rgb.py" ] || \
+    fail "run_rgb.py not found below APP_ROOT=$APP_ROOT"
 [ -f "$APP_ROOT/models/default.json" ] || fail "models/default.json is missing"
 [ -f "$APP_ROOT/native/liborbbec_bridge.so" ] || \
     fail "Orbbec bridge is missing; run tools/setup_orbbec_sdk.sh"
@@ -80,10 +81,12 @@ fi
 [[ "$WEB_PREVIEW_WIDTH" =~ ^[0-9]+$ ]] && [ "$WEB_PREVIEW_WIDTH" -ge 160 ] && [ "$WEB_PREVIEW_WIDTH" -le 1920 ] || \
     fail "WEB_PREVIEW_WIDTH must be in 160..1920"
 
-nm_devices="$(nmcli -t -f DEVICE,TYPE device status)"
+# nmcli localizes boolean values (for example, zh_CN prints "是" instead of
+# "yes").  Force a stable machine-readable locale for capability checks.
+nm_devices="$(LC_ALL=C nmcli -t -f DEVICE,TYPE device status)"
 grep -q "^${WIFI_IFACE}:wifi$" <<<"$nm_devices" || \
     fail "Wi-Fi interface not managed by NetworkManager: $WIFI_IFACE"
-nm_wifi="$(nmcli -f WIFI-PROPERTIES.AP device show "$WIFI_IFACE")"
+nm_wifi="$(LC_ALL=C nmcli -f WIFI-PROPERTIES.AP device show "$WIFI_IFACE")"
 grep -q 'yes' <<<"$nm_wifi" || \
     fail "Wi-Fi interface does not support AP mode: $WIFI_IFACE"
 

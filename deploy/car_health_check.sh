@@ -27,6 +27,14 @@ for service in ball-nx-control.service ball-vision-web.service; do
     fi
 done
 
+vision_exec="$(systemctl show ball-vision-web.service --property=ExecStart --value 2>/dev/null)"
+if grep -Fq '/run_rgb.py ' <<<"$vision_exec" && \
+        grep -Fq -- '--position-mode rgb-contour' <<<"$vision_exec"; then
+    ok "vision service uses run_rgb.py with RGB contour coordinates"
+else
+    bad "vision service is not configured for run_rgb.py / rgb-contour"
+fi
+
 active_connections="$(nmcli -t -f NAME connection show --active 2>/dev/null)"
 if grep -Fxq "$HOTSPOT_NAME" <<<"$active_connections"; then
     ok "hotspot $HOTSPOT_NAME active"

@@ -8,6 +8,7 @@ import threading
 import time
 import unittest
 import urllib.request
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -24,6 +25,18 @@ from ball_runtime.web_control import (
 
 
 class WebControlTests(unittest.TestCase):
+    def test_production_services_use_rgb_contour_runtime(self) -> None:
+        project = Path(__file__).resolve().parent.parent
+        service_files = (
+            project / "deploy/systemd/ball-vision-web.service.in",
+            project / "nx_control/deploy/ball-vision.service",
+        )
+        for service_file in service_files:
+            service = service_file.read_text(encoding="utf-8")
+            self.assertIn("run_rgb.py", service, str(service_file))
+            self.assertIn("--position-mode rgb-contour", service, str(service_file))
+            self.assertNotIn("/run.py", service, str(service_file))
+
     def test_page_contains_preview_and_task_controls(self) -> None:
         page = live_page(37)
         self.assertIn("/latest.jpg", page)

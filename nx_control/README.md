@@ -112,7 +112,7 @@ python3 tools/analyze_log.py logs/smoke.csv
   --state-file nx_control/state/tube-control-v3.seq \
   --command-socket /tmp/ball_nx_control.sock
 
-python3 run.py --no-serial --protocol tube-v3 \
+python3 run_rgb.py --no-serial --position-mode rgb-contour --protocol tube-v3 \
   --control-udp 127.0.0.1:29001
 ```
 
