@@ -146,7 +146,7 @@ def add_common_arguments(
     parser.add_argument(
         "--color-exposure-scale",
         type=float,
-        default=0.30,
+        default=0.35,
         help="manual exposure as a fraction of the SDK default when --color-exposure is omitted",
     )
     parser.add_argument(
