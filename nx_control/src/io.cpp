@@ -311,8 +311,7 @@ ControlConfig load_config(const std::string& path) {
             config.task3_braking_deceleration_m_s2 &&
         config.task3_positive_reverse_velocity_m_s >
             config.task3_friction_rolling_enter_velocity_m_s &&
-        config.task3_reverse_balance_rate_limit_rad_s >=
-            config.theta_rate_limit_rad_s &&
+        config.task3_reverse_balance_rate_limit_rad_s > 0.0 &&
         config.task3_friction_stationary_enter_velocity_m_s >= 0.0 &&
         config.task3_friction_rolling_enter_velocity_m_s >
             config.task3_friction_stationary_enter_velocity_m_s &&

@@ -130,6 +130,103 @@ def _draw_tube_ruler(canvas, negative, positive, mode: str) -> None:
     )
 
 
+def draw_web_preview(frame, result):
+    """Draw the ball detection and tube ruler used by the web video feed."""
+    canvas = frame.copy()
+    if result is None:
+        return canvas
+
+    ball_status = result.effective_ball_status
+    if ball_status == TrackStatus.MEASURED:
+        color = (0, 220, 0)
+    elif ball_status == TrackStatus.PREDICTED:
+        color = (0, 210, 255)
+    else:
+        color = (0, 80, 255)
+
+    detection = result.detection
+    if detection is not None:
+        x1 = int(round(detection.x1))
+        y1 = int(round(detection.y1))
+        x2 = int(round(detection.x2))
+        y2 = int(round(detection.y2))
+        center = tuple(int(round(value)) for value in detection.center)
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 3, cv2.LINE_AA)
+        cv2.drawMarker(
+            canvas,
+            center,
+            (0, 0, 255),
+            markerType=cv2.MARKER_CROSS,
+            markerSize=17,
+            thickness=2,
+            line_type=cv2.LINE_AA,
+        )
+        label = "BALL %.2f" % detection.confidence
+        if result.position_cm is not None and result.status != TrackStatus.LOST:
+            label += "  %+.2f cm" % result.position_cm
+        _draw_text_panel(
+            canvas,
+            label,
+            (x1, max(26, y1 - 8)),
+            color,
+            0.58,
+            2,
+        )
+
+    contour = result.tube_contour
+    pose = result.tube_pose
+    if (
+        pose is not None
+        and pose.valid
+        and pose.endpoint_negative_px is not None
+        and pose.endpoint_positive_px is not None
+    ):
+        _draw_tube_ruler(
+            canvas,
+            pose.endpoint_negative_px,
+            pose.endpoint_positive_px,
+            "rgbd",
+        )
+    elif (
+        contour is not None
+        and contour.valid
+        and contour.endpoint_negative_px is not None
+        and contour.endpoint_positive_px is not None
+    ):
+        _draw_tube_ruler(
+            canvas,
+            contour.endpoint_negative_px,
+            contour.endpoint_positive_px,
+            (
+                "rgb-contour"
+                if result.position_source == "rgb-contour"
+                else "reference"
+            ),
+        )
+
+    if result.position_projected_px is not None:
+        point = tuple(int(round(value)) for value in result.position_projected_px)
+        if detection is not None:
+            cv2.line(
+                canvas,
+                tuple(int(round(value)) for value in detection.center),
+                point,
+                (255, 0, 255),
+                1,
+                cv2.LINE_AA,
+            )
+        cv2.drawMarker(
+            canvas,
+            point,
+            (255, 0, 255),
+            cv2.MARKER_CROSS,
+            19,
+            2,
+            cv2.LINE_AA,
+        )
+    return canvas
+
+
 def draw_debug(
     frame,
     result,

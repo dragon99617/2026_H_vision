@@ -105,8 +105,25 @@ class TubeGeometryTests(unittest.TestCase):
         self.assertGreaterEqual(pose.valid_bin_ratio, 0.60)
         self.assertLessEqual(pose.rms_m, 0.004)
         self.assertAlmostEqual(pose.fitted_length_m, 0.25, places=6)
-        self.assertGreater(
+        self.assertLess(
             pose.endpoint_positive_px[0], pose.endpoint_negative_px[0]
+        )
+
+    def test_positive_end_defaults_left_and_can_be_overridden(self) -> None:
+        image, _ = synthetic_flat_scene()
+        default_contour = segment_white_tube(image, TubeGeometryConfig())
+        self.assertLess(
+            default_contour.endpoint_positive_px[0],
+            default_contour.endpoint_negative_px[0],
+        )
+
+        legacy_contour = segment_white_tube(
+            image,
+            TubeGeometryConfig(positive_end="image-right"),
+        )
+        self.assertGreater(
+            legacy_contour.endpoint_positive_px[0],
+            legacy_contour.endpoint_negative_px[0],
         )
 
     def test_signed_position_for_multiple_pitch_angles(self) -> None:

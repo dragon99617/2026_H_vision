@@ -13,7 +13,8 @@ from urllib.parse import urlparse
 import cv2
 
 from .latest import LatestValue
-from .types import FramePacket
+from .types import DetectionResult
+from .visualize import draw_web_preview
 
 
 class LatestJpeg:
@@ -80,7 +81,7 @@ class LatestJpeg:
 class FrameJpegEncoder(threading.Thread):
     def __init__(
         self,
-        frames: LatestValue[FramePacket],
+        results: LatestValue[DetectionResult],
         latest: LatestJpeg,
         stop_event: threading.Event,
         quality: int,
@@ -88,7 +89,7 @@ class FrameJpegEncoder(threading.Thread):
         preview_width: int = 640,
     ) -> None:
         super().__init__(name="web-jpeg-encoder", daemon=True)
-        self.frames = frames
+        self.results = results
         self.latest = latest
         self.stop_event = stop_event
         self.quality = max(1, min(100, int(quality)))
@@ -100,8 +101,8 @@ class FrameJpegEncoder(threading.Thread):
         next_encode = 0.0
         params = [int(cv2.IMWRITE_JPEG_QUALITY), self.quality]
         while not self.stop_event.is_set():
-            next_sequence, packet = self.frames.wait_after(sequence, timeout=0.5)
-            if next_sequence == sequence or packet is None:
+            next_sequence, result = self.results.wait_after(sequence, timeout=0.5)
+            if next_sequence == sequence or result is None:
                 continue
             sequence = next_sequence
             if not self.latest.encoding_needed():
@@ -109,12 +110,14 @@ class FrameJpegEncoder(threading.Thread):
             delay = next_encode - time.monotonic()
             if delay > 0.0 and self.stop_event.wait(delay):
                 break
-            newest_sequence, newest_packet = self.frames.get()
-            if newest_packet is not None and newest_sequence >= sequence:
+            newest_sequence, newest_result = self.results.get()
+            if newest_result is not None and newest_sequence >= sequence:
                 sequence = newest_sequence
-                packet = newest_packet
+                result = newest_result
             try:
-                image = packet.image
+                if result.source_image is None:
+                    raise RuntimeError("detection result has no source image")
+                image = draw_web_preview(result.source_image, result)
                 if (
                     self.preview_width > 0
                     and image.shape[1] > self.preview_width
@@ -131,7 +134,7 @@ class FrameJpegEncoder(threading.Thread):
                 ok, encoded = cv2.imencode(".jpg", image, params)
                 if not ok:
                     raise RuntimeError("OpenCV failed to encode the preview frame")
-                self.latest.update(encoded.tobytes(), packet.frame_id)
+                self.latest.update(encoded.tobytes(), result.frame_id)
                 next_encode = time.monotonic() + self.minimum_interval_s
             except Exception as exc:
                 self.latest.set_error(str(exc))
@@ -457,7 +460,7 @@ def make_handler(latest: LatestJpeg, control: NxControlClient, interval_ms: int)
 class WebControlServer:
     def __init__(
         self,
-        frames: LatestValue[FramePacket],
+        results: LatestValue[DetectionResult],
         stop_event: threading.Event,
         host: str,
         port: int,
@@ -474,7 +477,7 @@ class WebControlServer:
             timeout_s=max(1, int(control_timeout_ms)) / 1000.0,
         )
         self.encoder = FrameJpegEncoder(
-            frames,
+            results,
             self.latest,
             stop_event,
             jpeg_quality,

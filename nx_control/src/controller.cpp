@@ -525,7 +525,7 @@ ControlOutput NxController::tick(double now_s,
     task3_reverse_balance_active_ = false;
     task3_reverse_balance_done_ = false;
   } else if (task3_early_braking_active_) {
-    // The -4 cm safety brake has priority over the positive-return balance
+    // The one-shot -4 cm emergency brake has priority over return balancing
     // phase if the latter has not completed in time.
     task3_reverse_balance_active_ = false;
     task3_reverse_balance_done_ = true;
@@ -562,6 +562,8 @@ ControlOutput NxController::tick(double now_s,
   } else if (task3_positive_approach_braking) {
     task3_braking_direction = 1;
   } else if (task3_early_braking_active_) {
+    // Once the measured return crosses -4 cm, command acceleration opposite
+    // to travel until the ball has slowed to the settle-speed band.
     task3_braking_direction = -1;
   }
   const bool task3_braking_active = task3_braking_direction != 0;

@@ -190,14 +190,14 @@ struct ControlConfig {
   double period_s = 0.020;
   double rolling_lambda = kRollingLambda;
   double theta_limit_rad = 4.0 * 3.14159265358979323846 / 180.0;
-  double theta_rate_limit_rad_s = 2.0 * 3.14159265358979323846 / 180.0;
-  double position_soft_limit_m = 0.105;
-  double position_safe_limit_m = 0.115;
-  double pid_kp_s2 = 10.0;
-  double pid_ki_s3 = 0.8;
-  double pid_kd_s_inv = 5.0;
+  double theta_rate_limit_rad_s = 3.0 * 3.14159265358979323846 / 180.0;
+  double position_soft_limit_m = 0.085;
+  double position_safe_limit_m = 0.100;
+  double pid_kp_s2 = 6.0;
+  double pid_ki_s3 = 0.0;
+  double pid_kd_s_inv = 7.0;
   double pid_disturbance_gain = 0.5;
-  double pid_integral_output_limit_m_s2 = 0.030;
+  double pid_integral_output_limit_m_s2 = 0.0;
   double pid_integral_enable_error_m = 0.030;
   double pid_anti_windup_gain_s_inv = 5.0;
   double inner_angle_warning_rad =
@@ -209,9 +209,9 @@ struct ControlConfig {
   double hold_enter_position_error_m = 0.004;
   double hold_enter_velocity_m_s = 0.015;
   double hold_exit_position_error_m = 0.008;
-  double task3_reference_max_velocity_m_s = 0.070;
-  double task3_reference_max_acceleration_m_s2 = 0.100;
-  double task3_reference_max_jerk_m_s3 = 0.300;
+  double task3_reference_max_velocity_m_s = 0.040;
+  double task3_reference_max_acceleration_m_s2 = 0.060;
+  double task3_reference_max_jerk_m_s3 = 0.150;
   double task3_settle_position_error_m = 0.010;
   double task3_settle_velocity_m_s = 0.005;
   double task3_settle_dwell_s = 0.0;
@@ -224,15 +224,15 @@ struct ControlConfig {
       0.30 * 3.14159265358979323846 / 180.0;
   double task3_friction_blend_time_s = 0.20;
   double task3_friction_breakaway_timeout_s = 0.75;
-  double task3_braking_deceleration_m_s2 = 0.080;
+  double task3_braking_deceleration_m_s2 = 0.150;
   double task3_early_brake_position_m = 0.040;
-  double task3_positive_early_brake_position_m = 0.038;
+  double task3_positive_early_brake_position_m = 0.035;
   double task3_positive_reached_position_m = 0.040;
-  double task3_positive_overshoot_position_m = 0.050;
-  double task3_positive_overshoot_deceleration_m_s2 = 0.100;
+  double task3_positive_overshoot_position_m = 0.045;
+  double task3_positive_overshoot_deceleration_m_s2 = 0.200;
   double task3_positive_reverse_velocity_m_s = 0.020;
   double task3_reverse_balance_rate_limit_rad_s =
-      4.0 * 3.14159265358979323846 / 180.0;
+      (8.0 / 3.0) * 3.14159265358979323846 / 180.0;
   double task3_friction_rolling_enter_velocity_m_s = 0.010;
   double task3_friction_stationary_enter_velocity_m_s = 0.005;
   double task3_friction_disable_position_error_m = 0.0025;

@@ -3,8 +3,8 @@
 ## 坐标定义与运行
 
 开放半管的物理长度固定为 25.0 cm。程序拟合的是半管两侧三维边线的
-平均轴线，轴中点为 `0.00 cm`；投影横坐标较大的物理端固定为正端
-`+12.50 cm`，另一端为 `-12.50 cm`。两端横坐标差小于 20 px 时保持上一
+平均轴线，轴中点为 `0.00 cm`；投影横坐标较小的画面左端固定为正端
+`+12.50 cm`，画面右端为 `-12.50 cm`。两端横坐标差小于 20 px 时保持上一
 次方向；没有方向历史则输出无效，防止符号翻转。
 
 默认命令：
@@ -24,7 +24,7 @@ python3 run.py
 --protocol tube-v2
 --tube-length-cm 25
 --tube-pose-max-age-ms 100
---positive-end image-right
+--positive-end image-left
 --depth-width 640 --depth-height 400 --depth-fps 30
 ```
 
@@ -54,7 +54,7 @@ SDK 使用 `COLOR_FRAME_REQUIRE` 聚合，因此 60 Hz 彩色不会被 30 Hz 深
 约 30 Hz；YOLO、厘米投影和 USB 仍按最新彩色帧约 60 Hz。球允许最多两帧
 恒速预测，但过期管姿态绝不继续输出。
 
-Debug 窗口中青色是管道轮廓，紫色是三维轴，标出 `-12.5/0/+12.5`；
+Debug 窗口中青色是管道轮廓，紫色是三维轴，从左至右标出 `+12.5/0/-12.5`；
 同时显示球在轴上的投影、厘米位置、RGB/Depth/Pose/Inference FPS、Pitch、
 深度年龄、RMS、有效分箱比例和两个置信度。现场调光时可调：
 

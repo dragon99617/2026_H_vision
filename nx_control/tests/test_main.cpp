@@ -419,22 +419,25 @@ void test_pid_controller() {
                  4.0 * 3.14159265358979323846 / 180.0) < 1e-12,
         "NX default angle limit matches DMMC02 4.0 degree hard limit");
   check(std::abs(config.theta_rate_limit_rad_s -
-                 2.0 * 3.14159265358979323846 / 180.0) < 1e-12,
-        "NX default angle rate limit is 2 degrees per second");
+                 3.0 * 3.14159265358979323846 / 180.0) < 1e-12,
+        "NX default angle rate limit is 3 degrees per second");
   check(std::abs(config.task3_reverse_balance_rate_limit_rad_s -
-                 4.0 * 3.14159265358979323846 / 180.0) < 1e-12,
-        "Task 3 reverse-balance rate limit remains 4 degrees per second");
+                 (8.0 / 3.0) * 3.14159265358979323846 / 180.0) < 1e-12,
+        "Task 3 return-to-balance rate is two thirds of 4 degrees per second");
   check(std::abs(config.inner_angle_warning_dwell_s - 0.20) < 1e-12 &&
             std::abs(config.inner_angle_safe_dwell_s - 0.50) < 1e-12,
         "inner-angle watchdog defaults remain 0.2 s warning and 0.5 s SAFE");
-  check(std::abs(config.pid_kp_s2 - 10.0) < 1e-12 &&
-            std::abs(config.pid_ki_s3 - 0.8) < 1e-12 &&
-            std::abs(config.pid_kd_s_inv - 5.0) < 1e-12,
-        "PID defaults use the commissioned conservative starting gains");
+  check(std::abs(config.pid_kp_s2 - 6.0) < 1e-12 &&
+            std::abs(config.pid_ki_s3) < 1e-12 &&
+            std::abs(config.pid_kd_s_inv - 7.0) < 1e-12 &&
+            std::abs(config.pid_integral_output_limit_m_s2) < 1e-12,
+        "PID defaults use conservative gains with integration disabled");
   check(std::abs(config.hold_enter_position_error_m - 0.004) < 1e-12 &&
             std::abs(config.hold_enter_velocity_m_s - 0.015) < 1e-12 &&
             std::abs(config.hold_exit_position_error_m - 0.008) < 1e-12,
         "HoldTarget deadband defaults are 4 mm, 15 mm/s, and 8 mm");
+  config.pid_ki_s3 = 0.8;
+  config.pid_integral_output_limit_m_s2 = 0.030;
   nx_control::BallPid pid(config);
   nx_control::ObserverState estimate;
   estimate.position_m = 0.010;
@@ -449,9 +452,9 @@ void test_pid_controller() {
   check(std::abs(result.position_error_m - 0.010) < 1e-12 &&
             std::abs(result.velocity_error_m_s - 0.010) < 1e-12,
         "PID uses reference-minus-estimate position and velocity errors");
-  check(std::abs(result.proportional_m_s2 - 0.100) < 1e-12 &&
+  check(std::abs(result.proportional_m_s2 - 0.060) < 1e-12 &&
             std::abs(result.integral_m_s2 - 0.00016) < 1e-12 &&
-            std::abs(result.derivative_m_s2 - 0.050) < 1e-12,
+            std::abs(result.derivative_m_s2 - 0.070) < 1e-12,
         "PID P/I/D terms use observer velocity instead of differentiating camera position");
   check(std::abs(result.feedforward_m_s2 -
                  (0.050 + 0.040 / config.rolling_lambda)) < 1e-12 &&
@@ -500,10 +503,27 @@ void test_deployed_timing_contract() {
   check(std::abs(config.theta_limit_rad -
                  4.0 * 3.14159265358979323846 / 180.0) < 1e-12 &&
             std::abs(config.theta_rate_limit_rad_s -
-                     2.0 * 3.14159265358979323846 / 180.0) < 1e-12 &&
+                     3.0 * 3.14159265358979323846 / 180.0) < 1e-12 &&
             std::abs(config.task3_reverse_balance_rate_limit_rad_s -
-                     4.0 * 3.14159265358979323846 / 180.0) < 1e-12,
-        "deployed config preserves 4 degree clamp and physical 2/4 degree per second limits");
+                     (8.0 / 3.0) * 3.14159265358979323846 / 180.0) < 1e-12,
+        "deployed config preserves the 4 degree clamp and slower Task 3 return balancing");
+  check(std::abs(config.position_soft_limit_m - 0.085) < 1e-12 &&
+            std::abs(config.position_safe_limit_m - 0.100) < 1e-12 &&
+            std::abs(config.pid_kp_s2 - 6.0) < 1e-12 &&
+            std::abs(config.pid_ki_s3) < 1e-12 &&
+            std::abs(config.pid_kd_s_inv - 7.0) < 1e-12 &&
+            std::abs(config.pid_integral_output_limit_m_s2) < 1e-12,
+        "deployed config uses the requested safety limits and PID gains");
+  check(std::abs(config.task3_reference_max_velocity_m_s - 0.040) < 1e-12 &&
+            std::abs(config.task3_reference_max_acceleration_m_s2 - 0.060) < 1e-12 &&
+            std::abs(config.task3_reference_max_jerk_m_s3 - 0.150) < 1e-12 &&
+            std::abs(config.task3_braking_deceleration_m_s2 - 0.150) < 1e-12 &&
+            std::abs(config.task3_early_brake_position_m - 0.040) < 1e-12 &&
+            std::abs(config.task3_positive_early_brake_position_m - 0.035) < 1e-12 &&
+            std::abs(config.task3_positive_reached_position_m - 0.040) < 1e-12 &&
+            std::abs(config.task3_positive_overshoot_position_m - 0.045) < 1e-12 &&
+            std::abs(config.task3_positive_overshoot_deceleration_m_s2 - 0.200) < 1e-12,
+        "deployed config uses the requested slower Task 3 trajectory and earlier braking");
   check(std::abs(config.inner_angle_warning_rad -
                  1.0 * 3.14159265358979323846 / 180.0) < 1e-12 &&
             std::abs(config.inner_angle_safe_rad -
@@ -563,7 +583,7 @@ void test_task_manager() {
   nx_control::ReferencePoint tracking_reference =
       timed_task.update(20.0, tracking_state, nullptr, &tracking_tube, true);
   double reference_sequence_elapsed_s = -1.0;
-  for (int sample = 1; sample <= 250; ++sample) {
+  for (int sample = 1; sample <= 360; ++sample) {
     tracking_state.position_m = tracking_reference.position_m;
     tracking_state.velocity_m_s = tracking_reference.velocity_m_s;
     tracking_reference =
@@ -577,8 +597,8 @@ void test_task_manager() {
     }
   }
   check(reference_sequence_elapsed_s > 0.0 &&
-            reference_sequence_elapsed_s <= 5.0,
-        "Task 3 perfect-tracking reference completes 0 -> +5 -> -5 cm within 5 seconds");
+            reference_sequence_elapsed_s <= 7.2,
+        "Task 3 perfect-tracking reference completes 0 -> +5 -> -5 cm within 7.2 seconds");
 
   state = nx_control::ObserverState{0.0400, 0.050, 0.0};
   tube.theta_actual_rad =
@@ -939,9 +959,11 @@ void test_controller_safety() {
     prediction_vision.receive_time_s = now_s;
     prediction_controller.ingest_vision(prediction_vision);
   };
-  ingest_prediction_sample(1U, 30.0, 0.1000);
+  ingest_prediction_sample(1U, 30.0,
+                           config.position_soft_limit_m - 0.0050);
   prediction_controller.tick(30.0);
-  ingest_prediction_sample(2U, 30.02, 0.1004);
+  ingest_prediction_sample(2U, 30.02,
+                           config.position_soft_limit_m - 0.0046);
   prediction_controller.tick(30.02);
   nx_control::TubeStatus prediction_tube;
   prediction_tube.sequence = 3U;
@@ -1015,7 +1037,7 @@ void test_controller_angle_limit() {
           "controller final output does not exceed 4.0 degrees");
     check(output.command.theta_cmd_rad - previous_theta_rad <=
               config.theta_rate_limit_rad_s * config.period_s + 1e-12,
-          "controller final output retains the 2 degrees per second rate limit");
+          "controller final output retains the configured angle rate limit");
     previous_theta_rad = output.command.theta_cmd_rad;
   }
 
@@ -1024,8 +1046,8 @@ void test_controller_angle_limit() {
   const auto packet = nx_control::protocol::encode_control_command(output.command);
   check(packet[16] == 0x90U && packet[17] == 0x01U,
         "tube-control-v3 still encodes 4.0 degrees as 400 cdeg");
-  check(packet[18] == 0xC8U && packet[19] == 0x00U,
-        "tube-control-v3 encodes the rate limit as 200 cdeg per second");
+  check(packet[18] == 0x2CU && packet[19] == 0x01U,
+        "tube-control-v3 encodes the rate limit as 300 cdeg per second");
 }
 
 void test_inner_angle_watchdog() {
@@ -1566,7 +1588,7 @@ void test_controller_task3_position_early_braking() {
     feedback_theta_rad = output.command.theta_cmd_rad;
   }
   check(saw_reverse_balance && reverse_balance_command_ok,
-        "Task 3 detects robust negative velocity and drives directly to balance at 4 degrees per second");
+        "Task 3 detects robust negative velocity and returns directly to balance at two-thirds speed");
   check(saw_speed_control_after_balance,
         "Task 3 exits the one-shot balance phase and restores normal speed control");
 }

@@ -40,10 +40,13 @@ class TubeGeometryConfig:
     depth_stride: int = 4
     min_depth_m: float = 0.12
     max_depth_m: float = 2.5
+    positive_end: str = "image-left"
 
     def __post_init__(self) -> None:
         if self.tube_length_cm <= 0:
             raise ValueError("tube_length_cm must be positive")
+        if self.positive_end not in ("image-left", "image-right"):
+            raise ValueError("positive_end must be image-left or image-right")
         if not 0.0 < self.min_valid_bin_ratio <= 1.0:
             raise ValueError("min_valid_bin_ratio must be in (0, 1]")
         if self.longitudinal_bins < 8:
@@ -248,7 +251,8 @@ def segment_tube(
     covariance = centered.T.dot(centered) / max(1, len(points) - 1)
     values, vectors = np.linalg.eigh(covariance)
     axis = vectors[:, int(np.argmax(values))]
-    if axis[0] < 0.0:
+    positive_points_right = config.positive_end == "image-right"
+    if (axis[0] > 0.0) != positive_points_right:
         axis = -axis
     lateral_axis = np.array((-axis[1], axis[0]))
     longitudinal = centered.dot(axis)
@@ -721,7 +725,8 @@ class TubePoseEstimator:
         )
         dx = float(projected[1, 0] - projected[0, 0])
         if abs(dx) >= self.config.sign_deadband_px:
-            if dx < 0.0:
+            positive_points_right = self.config.positive_end == "image-right"
+            if (dx > 0.0) != positive_points_right:
                 direction = -direction
             self._positive_direction = direction.copy()
         elif self._positive_direction is not None:

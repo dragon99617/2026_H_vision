@@ -89,6 +89,19 @@ class RgbTubePositionDetectorTests(unittest.TestCase):
         )
         self.assertAlmostEqual(result.position_cm, -6.25, delta=0.1)
 
+    def test_image_left_is_positive_and_image_right_is_negative(self) -> None:
+        left_ball = FakeBallDetector(self.detection_at_fraction(1.0))
+        left_result = RgbTubePositionDetector(left_ball, self.config).detect(
+            self.packet()
+        )
+        self.assertAlmostEqual(left_result.position_cm, 12.5, delta=0.1)
+
+        right_ball = FakeBallDetector(self.detection_at_fraction(0.0))
+        right_result = RgbTubePositionDetector(right_ball, self.config).detect(
+            self.packet()
+        )
+        self.assertAlmostEqual(right_result.position_cm, -12.5, delta=0.1)
+
     def test_ball_outside_contour_is_rejected(self) -> None:
         ball = FakeBallDetector(Detection(0, 0, 20, 20, 0.9))
         result = RgbTubePositionDetector(ball, self.config).detect(

@@ -11,7 +11,7 @@ from ball_runtime.types import (
     TrackStatus,
     TubePose,
 )
-from ball_runtime.visualize import draw_debug
+from ball_runtime.visualize import draw_debug, draw_web_preview
 from tests.test_tube_geometry import synthetic_flat_scene
 
 
@@ -86,6 +86,32 @@ class DebugVisualizationTests(unittest.TestCase):
             canvas == np.array((0, 220, 0), dtype=np.uint8), axis=2
         ).sum()
         self.assertGreater(green_axis_pixels, 20)
+
+    def test_web_preview_draws_ball_box_and_centimetre_ruler(self) -> None:
+        image, _ = synthetic_flat_scene()
+        contour = segment_white_tube(image, TubeGeometryConfig())
+        result = DetectionResult(
+            frame_id=1,
+            captured_monotonic=1.0,
+            completed_monotonic=1.01,
+            inference_ms=10.0,
+            detections=(Detection(630, 390, 650, 410, 0.9),),
+            source_image=image,
+            status=TrackStatus.MEASURED,
+            tube_contour=contour,
+            position_cm=0.0,
+            position_projected_px=(640.0, 400.0),
+            position_source="rgb-contour",
+        )
+        canvas = draw_web_preview(image, result)
+        green_pixels = np.all(
+            canvas == np.array((0, 220, 0), dtype=np.uint8), axis=2
+        ).sum()
+        yellow_pixels = np.all(
+            canvas == np.array((0, 255, 255), dtype=np.uint8), axis=2
+        ).sum()
+        self.assertGreater(green_pixels, 40)
+        self.assertGreater(yellow_pixels, 20)
 
 
 if __name__ == "__main__":

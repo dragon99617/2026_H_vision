@@ -216,8 +216,9 @@ def add_common_arguments(
     parser.add_argument("--tube-pose-max-age-ms", type=float, default=100.0)
     parser.add_argument(
         "--positive-end",
-        choices=("image-right",),
-        default="image-right",
+        choices=("image-left", "image-right"),
+        default="image-left",
+        help="Image side assigned +tube_length/2 (default: image-left)",
     )
     parser.add_argument("--tube-min-projection-px", type=float, default=400.0)
     parser.add_argument("--tube-min-depth-ratio", type=float, default=0.60)
@@ -289,6 +290,7 @@ class Runtime:
         if self.args.protocol in ("tube-v2", "tube-v3"):
             geometry_config = TubeGeometryConfig(
                 tube_length_cm=self.args.tube_length_cm,
+                positive_end=self.args.positive_end,
                 min_projected_length_px=self.args.tube_min_projection_px,
                 min_valid_bin_ratio=self.args.tube_min_depth_ratio,
                 max_rms_m=self.args.tube_max_rms_mm / 1000.0,
@@ -501,7 +503,7 @@ class Runtime:
         )
         if self.args.web_port:
             self.web_server = WebControlServer(
-                self.frames,
+                self.results,
                 self.stop_event,
                 self.args.web_host,
                 self.args.web_port,

@@ -14,7 +14,12 @@ import cv2
 import numpy as np
 
 from ball_runtime.latest import LatestValue
-from ball_runtime.types import FramePacket
+from ball_runtime.types import (
+    Detection,
+    DetectionResult,
+    TrackStatus,
+    TubeContour,
+)
 from ball_runtime.web_control import (
     FrameJpegEncoder,
     LatestJpeg,
@@ -25,6 +30,26 @@ from ball_runtime.web_control import (
 
 
 class WebControlTests(unittest.TestCase):
+    @staticmethod
+    def _result(frame_id, image):
+        return DetectionResult(
+            frame_id=frame_id,
+            captured_monotonic=time.monotonic(),
+            completed_monotonic=time.monotonic(),
+            inference_ms=1.0,
+            detections=(Detection(8, 6, 24, 18, 0.9),),
+            source_image=image,
+            status=TrackStatus.MEASURED,
+            tube_contour=TubeContour(
+                valid=True,
+                endpoint_negative_px=(4.0, 12.0),
+                endpoint_positive_px=(28.0, 12.0),
+            ),
+            position_cm=0.0,
+            position_projected_px=(16.0, 12.0),
+            position_source="rgb-contour",
+        )
+
     def test_production_services_use_rgb_contour_runtime(self) -> None:
         project = Path(__file__).resolve().parent.parent
         service_files = (
@@ -59,12 +84,12 @@ class WebControlTests(unittest.TestCase):
         self.assertFalse(inactive_target["ok"])
         self.assertEqual(inactive_target["error_code"], "TASK6_NOT_ACTIVE")
 
-    def test_encoder_reuses_runtime_frame_without_a_second_camera(self) -> None:
-        frames = LatestValue()
+    def test_encoder_reuses_detection_result_and_draws_preview_overlay(self) -> None:
+        results = LatestValue()
         latest = LatestJpeg()
         stop_event = threading.Event()
         encoder = FrameJpegEncoder(
-            frames,
+            results,
             latest,
             stop_event,
             quality=70,
@@ -75,13 +100,7 @@ class WebControlTests(unittest.TestCase):
         try:
             image = np.zeros((24, 32, 3), dtype=np.uint8)
             image[:, :, 1] = 180
-            frames.publish(
-                FramePacket(
-                    frame_id=42,
-                    captured_monotonic=time.monotonic(),
-                    image=image,
-                )
-            )
+            results.publish(self._result(42, image))
             jpeg, sequence, frame_id, error = latest.wait(2.0)
             self.assertEqual(error, "")
             self.assertIsNotNone(jpeg)
@@ -91,13 +110,7 @@ class WebControlTests(unittest.TestCase):
             self.assertEqual(decoded.shape[:2], (12, 16))
             self.assertGreater(sequence, 0)
             self.assertEqual(frame_id, 42)
-            frames.publish(
-                FramePacket(
-                    frame_id=43,
-                    captured_monotonic=time.monotonic(),
-                    image=image,
-                )
-            )
+            results.publish(self._result(43, image))
             time.sleep(0.1)
             self.assertEqual(latest.status()["frame_sequence"], sequence)
         finally:
@@ -106,7 +119,7 @@ class WebControlTests(unittest.TestCase):
         self.assertFalse(encoder.is_alive())
 
     def test_http_image_and_task_request_share_the_runtime(self) -> None:
-        frames = LatestValue()
+        results = LatestValue()
         stop_event = threading.Event()
         with tempfile.TemporaryDirectory(prefix="ball-web-test-") as temporary:
             control_path = os.path.join(temporary, "control.sock")
@@ -149,7 +162,7 @@ class WebControlTests(unittest.TestCase):
             controller_thread = threading.Thread(target=serve_controller, daemon=True)
             controller_thread.start()
             server = WebControlServer(
-                frames,
+                results,
                 stop_event,
                 "127.0.0.1",
                 0,
@@ -162,13 +175,7 @@ class WebControlTests(unittest.TestCase):
             base = "http://%s:%d" % (host, port)
             try:
                 image = np.full((24, 32, 3), 127, dtype=np.uint8)
-                frames.publish(
-                    FramePacket(
-                        frame_id=99,
-                        captured_monotonic=time.monotonic(),
-                        image=image,
-                    )
-                )
+                results.publish(self._result(99, image))
                 with urllib.request.urlopen(base + "/latest.jpg", timeout=2.0) as response:
                     jpeg = response.read()
                     self.assertEqual(response.headers["X-Camera-Frame-Id"], "99")
