@@ -1,0 +1,15 @@
+[Unit]
+Description=Ball YOLO26s vision producer
+After=ball-nx-control.service
+Requires=ball-nx-control.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nx/ball_yolo26s_nx
+ExecStart=/usr/bin/python3 run.py --no-serial --protocol tube-v3 --control-udp 127.0.0.1:29001
+Restart=on-failure
+RestartSec=1
+User=nx
+
+[Install]
+WantedBy=multi-user.target

@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 
 from .camera import CameraWorker
+from .datagram_writer import DatagramWriter, parse_udp_endpoint
 from .inference import InferenceWorker
 from .latest import LatestValue
 from .rgb_tube_position_detector import RgbTubePositionDetector
@@ -147,6 +148,11 @@ def add_common_arguments(
     parser.add_argument("--serial", default=serial_default, help="path, auto, or off")
     parser.add_argument("--no-serial", action="store_true")
     parser.add_argument("--baud", type=positive_int, default=921600)
+    parser.add_argument(
+        "--control-udp",
+        default="off",
+        help="Send timestamped tube-v3 to the NX controller at HOST:PORT",
+    )
     parser.add_argument("--stats-interval", type=float, default=2.0)
     parser.add_argument("--max-seconds", type=float, default=0.0)
     parser.add_argument(
@@ -168,7 +174,7 @@ def add_common_arguments(
     parser.add_argument("--hold-frames", type=int, default=2)
     parser.add_argument(
         "--protocol",
-        choices=("tube-v2", "pixel-v1"),
+        choices=("tube-v3", "tube-v2", "pixel-v1"),
         default="tube-v2",
     )
     parser.add_argument("--tube-length-cm", type=float, default=25.0)
@@ -216,6 +222,7 @@ class Runtime:
         self.camera: Optional[CameraWorker] = None
         self.inference: Optional[InferenceWorker] = None
         self.serial_writer: Optional[SerialWriter] = None
+        self.control_writer: Optional[DatagramWriter] = None
         self.tube_pose_worker: Optional[TubePoseWorker] = None
         self.rgb_tube_worker: Optional[RgbTubeWorker] = None
         self.power_mode = read_power_mode()
@@ -232,7 +239,7 @@ class Runtime:
             smooth_alpha=self.args.track_alpha,
             hold_frames=self.args.hold_frames,
         )
-        if self.args.protocol == "tube-v2":
+        if self.args.protocol in ("tube-v2", "tube-v3"):
             geometry_config = TubeGeometryConfig(
                 tube_length_cm=self.args.tube_length_cm,
                 min_projected_length_px=self.args.tube_min_projection_px,
@@ -327,6 +334,8 @@ class Runtime:
         if serial_mode.lower() != "off":
             self.serial_writer = SerialWriter(serial_mode, self.args.baud)
             self.serial_writer.start()
+        if self.args.control_udp.lower() != "off":
+            self.control_writer = DatagramWriter(self.args.control_udp)
 
         def submit(result: DetectionResult) -> None:
             if self.serial_writer is not None:
@@ -338,6 +347,8 @@ class Runtime:
                         protocol=self.args.protocol,
                     )
                 )
+            if self.control_writer is not None:
+                self.control_writer.submit(encode_result(result, protocol="tube-v3"))
             if self.position_csv_writer is not None:
                 if not self.position_csv_armed:
                     if not result.has_valid_position:
@@ -403,6 +414,7 @@ class Runtime:
         on_result = (
             submit
             if self.serial_writer is not None
+            or self.control_writer is not None
             or self.position_csv_writer is not None
             else None
         )
@@ -419,7 +431,7 @@ class Runtime:
             depth_height=self.args.depth_height,
             depth_fps=self.args.depth_fps,
             enable_depth=(
-                self.args.protocol == "tube-v2"
+                self.args.protocol in ("tube-v2", "tube-v3")
                 and self.args.position_mode == "rgbd"
             ),
             color_auto_exposure=self.args.color_auto_exposure,
@@ -453,6 +465,9 @@ class Runtime:
             self.rgb_tube_worker.join()
         if self.serial_writer is not None:
             self.serial_writer.stop()
+        if self.control_writer is not None:
+            self.control_writer.close()
+            self.control_writer = None
         if self.position_csv_handle is not None:
             self.position_csv_handle.flush()
             self.position_csv_handle.close()
@@ -764,6 +779,13 @@ def debug_main(position_mode_default: str = "rgbd") -> int:
 
 
 def validate_tube_arguments(parser: argparse.ArgumentParser, args) -> None:
+    if args.control_udp.lower() != "off":
+        try:
+            parse_udp_endpoint(args.control_udp)
+        except (TypeError, ValueError) as exc:
+            parser.error(str(exc))
+        if args.protocol == "pixel-v1":
+            parser.error("--control-udp requires tube-v2 or tube-v3 position mode")
     if args.tube_length_cm <= 0:
         parser.error("--tube-length-cm must be positive")
     if args.tube_pose_max_age_ms <= 0:
@@ -781,11 +803,11 @@ def validate_tube_arguments(parser: argparse.ArgumentParser, args) -> None:
     if args.color_exposure_scale <= 0:
         parser.error("--color-exposure-scale must be positive")
     if (
-        args.protocol == "tube-v2"
+        args.protocol in ("tube-v2", "tube-v3")
         and args.position_mode == "rgbd"
         and args.camera_backend != "sdk"
     ):
-        parser.error("RGB-D tube-v2 requires --camera-backend sdk with depth")
+        parser.error("RGB-D tube protocol requires --camera-backend sdk with depth")
     if (
         args.reference_position_cm is not None
         and not -args.tube_length_cm / 2.0

@@ -8,9 +8,12 @@ from .types import DetectionResult, TrackStatus
 MAGIC = b"\xA5\x5A"
 PIXEL_VERSION = 1
 TUBE_VERSION = 2
+TUBE_TIMESTAMP_VERSION = 3
 VERSION = PIXEL_VERSION
 PAYLOAD_LENGTH = 11
 PACKET_LENGTH = 18
+TIMESTAMP_PAYLOAD_LENGTH = 15
+TIMESTAMP_PACKET_LENGTH = 22
 
 
 def crc16_ccitt_false(data: bytes) -> int:
@@ -82,19 +85,58 @@ def encode_tube_packet(
     return MAGIC + body + struct.pack("<H", crc16_ccitt_false(body))
 
 
+def encode_tube_v3_packet(
+    frame_id: int,
+    status: int,
+    position_x100_cm: int = 0,
+    ball_confidence: int = 0,
+    tube_confidence: int = 0,
+    capture_time_ms: int = 0,
+) -> bytes:
+    if int(status) not in set(int(item) for item in TrackStatus):
+        raise ValueError("invalid tracking status")
+    if not -0x8000 <= int(position_x100_cm) <= 0x7FFF:
+        raise ValueError("position_x100_cm is outside int16 range")
+    for name, value in (
+        ("ball_confidence", ball_confidence),
+        ("tube_confidence", tube_confidence),
+    ):
+        if not 0 <= int(value) <= 1000:
+            raise ValueError("%s must be in 0..1000" % name)
+    if int(status) == int(TrackStatus.LOST):
+        position_x100_cm = ball_confidence = tube_confidence = 0
+    payload = struct.pack(
+        "<IBhHHI",
+        int(frame_id) & 0xFFFFFFFF,
+        int(status),
+        int(position_x100_cm),
+        int(ball_confidence),
+        int(tube_confidence),
+        int(capture_time_ms) & 0xFFFFFFFF,
+    )
+    body = struct.pack("<BH", TUBE_TIMESTAMP_VERSION, TIMESTAMP_PAYLOAD_LENGTH) + payload
+    return MAGIC + body + struct.pack("<H", crc16_ccitt_false(body))
+
+
 def encode_result(
     result: DetectionResult,
     width: int = 1280,
     height: int = 800,
     protocol: str = "pixel-v1",
 ) -> bytes:
-    if protocol == "tube-v2":
+    if protocol in ("tube-v2", "tube-v3"):
         detection = result.detection
         if (
             detection is None
             or not result.has_valid_position
             or result.position_cm is None
         ):
+            if protocol == "tube-v3":
+                return encode_tube_v3_packet(
+                    result.frame_id,
+                    TrackStatus.LOST,
+                    capture_time_ms=int(round(result.captured_monotonic * 1000.0)),
+                )
             return encode_tube_packet(result.frame_id, TrackStatus.LOST)
         position = min(
             0x7FFF,
@@ -106,15 +148,20 @@ def encode_result(
         tube_confidence = min(
             1000, max(0, int(round(result.tube_confidence * 1000.0)))
         )
+        if protocol == "tube-v3":
+            return encode_tube_v3_packet(
+                result.frame_id,
+                result.status,
+                position,
+                ball_confidence,
+                tube_confidence,
+                int(round(result.captured_monotonic * 1000.0)),
+            )
         return encode_tube_packet(
-            result.frame_id,
-            result.status,
-            position,
-            ball_confidence,
-            tube_confidence,
+            result.frame_id, result.status, position, ball_confidence, tube_confidence
         )
     if protocol != "pixel-v1":
-        raise ValueError("protocol must be pixel-v1 or tube-v2")
+        raise ValueError("protocol must be pixel-v1, tube-v2, or tube-v3")
     detection = result.detection
     ball_status = result.effective_ball_status
     if detection is None or ball_status == TrackStatus.LOST:
@@ -155,3 +202,36 @@ def decode_packet(packet: bytes) -> Tuple[int, TrackStatus, int, int, int]:
     if status == TrackStatus.LOST and (value_a or value_b or value_c):
         raise ValueError("lost packet must contain zero values")
     return frame_id, status, value_a, value_b, value_c
+
+
+def decode_tube_v3_packet(
+    packet: bytes,
+) -> Tuple[int, TrackStatus, int, int, int, int]:
+    if len(packet) != TIMESTAMP_PACKET_LENGTH:
+        raise ValueError("packet length must be %d" % TIMESTAMP_PACKET_LENGTH)
+    if packet[:2] != MAGIC:
+        raise ValueError("invalid magic")
+    version, payload_length = struct.unpack_from("<BH", packet, 2)
+    if version != TUBE_TIMESTAMP_VERSION or payload_length != TIMESTAMP_PAYLOAD_LENGTH:
+        raise ValueError("invalid tube-v3 header")
+    body = packet[2:-2]
+    expected_crc = struct.unpack_from("<H", packet, TIMESTAMP_PACKET_LENGTH - 2)[0]
+    if crc16_ccitt_false(body) != expected_crc:
+        raise ValueError("CRC mismatch")
+    frame_id, raw_status, position, ball_confidence, tube_confidence, capture_time_ms = (
+        struct.unpack_from("<IBhHHI", packet, 5)
+    )
+    try:
+        status = TrackStatus(raw_status)
+    except ValueError as exc:
+        raise ValueError("invalid tracking status") from exc
+    if status == TrackStatus.LOST and (position or ball_confidence or tube_confidence):
+        raise ValueError("lost packet must contain zero values")
+    return (
+        frame_id,
+        status,
+        position,
+        ball_confidence,
+        tube_confidence,
+        capture_time_ms,
+    )

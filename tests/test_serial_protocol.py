@@ -4,11 +4,14 @@ import unittest
 
 from ball_runtime.serial_protocol import (
     PACKET_LENGTH,
+    TIMESTAMP_PACKET_LENGTH,
     crc16_ccitt_false,
     decode_packet,
+    decode_tube_v3_packet,
     encode_packet,
     encode_result,
     encode_tube_packet,
+    encode_tube_v3_packet,
 )
 from ball_runtime.types import Detection, DetectionResult, TrackStatus, TubePose
 
@@ -127,6 +130,36 @@ class SerialProtocolTests(unittest.TestCase):
             decode_packet(encode_result(result, protocol="tube-v2")),
             (13, TrackStatus.MEASURED, 312, 910, 820),
         )
+
+    def test_v3_adds_capture_timestamp_and_preserves_v2_fields(self) -> None:
+        packet = encode_tube_v3_packet(
+            0x12345678,
+            TrackStatus.MEASURED,
+            -625,
+            876,
+            943,
+            0x01020304,
+        )
+        self.assertEqual(len(packet), TIMESTAMP_PACKET_LENGTH)
+        self.assertEqual(
+            decode_tube_v3_packet(packet),
+            (0x12345678, TrackStatus.MEASURED, -625, 876, 943, 0x01020304),
+        )
+
+    def test_v3_result_uses_camera_capture_monotonic(self) -> None:
+        result = DetectionResult(
+            frame_id=14,
+            captured_monotonic=123.4564,
+            completed_monotonic=123.470,
+            inference_ms=5.0,
+            detections=(Detection(10, 20, 30, 40, 0.9),),
+            status=TrackStatus.MEASURED,
+            tube_confidence=0.8,
+            position_cm=1.25,
+            position_source="rgb-contour",
+        )
+        decoded = decode_tube_v3_packet(encode_result(result, protocol="tube-v3"))
+        self.assertEqual(decoded, (14, TrackStatus.MEASURED, 125, 900, 800, 123456))
 
 
 if __name__ == "__main__":

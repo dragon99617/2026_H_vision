@@ -16,6 +16,10 @@
 半管轴向厘米位置；`--protocol pixel-v1` 可兼容旧的二维球心协议。
 原始数据目录 `../data` 只读，所有生成数据、权重、Engine 和报告均保存在本工程。
 
+滚球闭环的 C++17 NX 控制项目位于 [`nx_control/`](nx_control/README.md)。视觉
+进程可用 `--control-udp 127.0.0.1:29001` 非阻塞发送带曝光时刻的22字节
+`tube-v3`；原有18字节 `tube-v2` 串口输出保持兼容。
+
 ## 当前平台与设计
 
 - JetPack 5.1.4、CUDA 11.4、TensorRT 8.5.2、Python 3.8。
