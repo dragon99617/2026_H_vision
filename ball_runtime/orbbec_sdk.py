@@ -106,10 +106,14 @@ def _camera_intrinsics(
 class HardwareMjpegDecoder:
     """Decode SDK MJPEG frames with Jetson nvjpegdec, with an explicit fallback."""
 
+    FIRST_SAMPLE_TIMEOUT_NS = 1_000_000_000
+    STEADY_SAMPLE_TIMEOUT_NS = 250_000_000
+
     def __init__(self, width: int, height: int, fps: int) -> None:
         self.width = int(width)
         self.height = int(height)
         self.fps = int(fps)
+        self._decoded_frames = 0
         self.backend = "opencv-imdecode"
         self.pipeline = None
         self.source = None
@@ -123,7 +127,8 @@ class HardwareMjpegDecoder:
 
             Gst.init(None)
             description = (
-                "appsrc name=source is-live=true block=true format=time "
+                "appsrc name=source is-live=true block=true do-timestamp=true "
+                "format=time "
                 "caps=image/jpeg,width=%d,height=%d,framerate=%d/1 ! "
                 "jpegparse ! nvjpegdec ! "
                 "video/x-raw(memory:NVMM),format=Y42B ! "
@@ -159,9 +164,29 @@ class HardwareMjpegDecoder:
         flow = self.source.emit("push-buffer", buffer)
         if flow != Gst.FlowReturn.OK:
             raise RuntimeError("nvjpegdec appsrc rejected MJPEG frame")
-        sample = self.sink.emit("try-pull-sample", 100_000_000)
+        timeout_ns = (
+            self.FIRST_SAMPLE_TIMEOUT_NS
+            if self._decoded_frames == 0
+            else self.STEADY_SAMPLE_TIMEOUT_NS
+        )
+        sample = self.sink.emit("try-pull-sample", timeout_ns)
         if sample is None:
-            raise RuntimeError("timed out waiting for nvjpegdec output")
+            bus = self.pipeline.get_bus()
+            message = bus.pop_filtered(
+                Gst.MessageType.ERROR | Gst.MessageType.EOS
+            )
+            if message is not None and message.type == Gst.MessageType.ERROR:
+                error, debug = message.parse_error()
+                detail = ": %s" % debug if debug else ""
+                raise RuntimeError(
+                    "nvjpegdec GStreamer error: %s%s" % (error, detail)
+                )
+            if message is not None and message.type == Gst.MessageType.EOS:
+                raise RuntimeError("nvjpegdec reached unexpected end of stream")
+            raise RuntimeError(
+                "timed out after %.0f ms waiting for nvjpegdec output"
+                % (timeout_ns / 1_000_000.0)
+            )
         output = sample.get_buffer()
         ok, mapping = output.map(Gst.MapFlags.READ)
         if not ok:
@@ -174,7 +199,11 @@ class HardwareMjpegDecoder:
                     "nvjpegdec returned %d bytes, expected %d"
                     % (pixels.size, expected)
                 )
-            return pixels[:expected].reshape(self.height, self.width, 3).copy()
+            decoded = (
+                pixels[:expected].reshape(self.height, self.width, 3).copy()
+            )
+            self._decoded_frames += 1
+            return decoded
         finally:
             output.unmap(mapping)
 

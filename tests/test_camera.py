@@ -13,10 +13,20 @@ from ball_runtime.camera import (
     resolve_device,
 )
 from ball_runtime.latest import LatestValue
-from ball_runtime.orbbec_sdk import OrbbecSdkCapture
+from ball_runtime.orbbec_sdk import HardwareMjpegDecoder, OrbbecSdkCapture
 
 
 class CameraPipelineTests(unittest.TestCase):
+    def test_nvjpegdec_allows_extra_time_for_jetson_cold_start(self) -> None:
+        self.assertEqual(
+            HardwareMjpegDecoder.FIRST_SAMPLE_TIMEOUT_NS,
+            1_000_000_000,
+        )
+        self.assertEqual(
+            HardwareMjpegDecoder.STEADY_SAMPLE_TIMEOUT_NS,
+            250_000_000,
+        )
+
     def test_manual_exposure_is_clamped_to_device_step(self) -> None:
         self.assertEqual(
             OrbbecSdkCapture._clamp_to_range(73, 10, 100, 5),
