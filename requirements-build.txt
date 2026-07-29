@@ -1,0 +1,4 @@
+# Build-time only: used by the TensorRT 8.5 ONNX compatibility patch.
+onnx==1.14.1
+onnxruntime==1.16.3
+protobuf==5.29.6

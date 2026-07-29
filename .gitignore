@@ -1,0 +1,13 @@
+.venv-train/
+.cache/
+__pycache__/
+*.pyc
+*.cache
+Log/
+runs/
+artifacts/training/
+artifacts/engine_build/
+models/*.engine.cache
+models/*.engine.cache.lock
+yolo26n.pt
+third_party/orbbec_sdk/

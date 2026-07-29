@@ -1,0 +1,173 @@
+{
+  "confidence": 0.7799898386001587,
+  "candidates": [
+    {
+      "width": 768,
+      "height": 480,
+      "engine": "models/ball_yolo26s_768x480_fp16.engine",
+      "benchmark": {
+        "pure_fps": 76.247,
+        "gpu_mean_ms": 13.1143,
+        "command": [
+          "/usr/src/tensorrt/bin/trtexec",
+          "--loadEngine=/home/d/2026ti/2026H/ball_yolo26s_nx/models/ball_yolo26s_768x480_fp16.engine",
+          "--warmUp=1000",
+          "--duration=10",
+          "--iterations=10000",
+          "--useCudaGraph",
+          "--noDataTransfers"
+        ]
+      },
+      "pytorch_metrics": {
+        "threshold": 0.7799898386001587,
+        "tp": 99,
+        "fp": 0,
+        "fn": 5,
+        "precision": 1.0,
+        "recall": 0.9519230769230769,
+        "f1": 0.9753694581280787,
+        "map50": 0.9991694833238658,
+        "images": 17,
+        "ground_truth_objects": 104,
+        "raw_predictions": 138
+      },
+      "onnx_metrics": {
+        "threshold": 0.7799898386001587,
+        "tp": 99,
+        "fp": 0,
+        "fn": 5,
+        "precision": 1.0,
+        "recall": 0.9519230769230769,
+        "f1": 0.9753694581280787,
+        "map50": 0.9992569538446182,
+        "images": 17,
+        "ground_truth_objects": 104,
+        "raw_predictions": 136,
+        "input_shape": [
+          1,
+          3,
+          480,
+          768
+        ],
+        "cpu_inference_mean_ms": 463.816120823514
+      },
+      "metrics": {
+        "threshold": 0.7799898386001587,
+        "tp": 99,
+        "fp": 0,
+        "fn": 5,
+        "precision": 1.0,
+        "recall": 0.9519230769230769,
+        "f1": 0.9753694581280787,
+        "map50": 0.9992544006377632,
+        "images": 17,
+        "ground_truth_objects": 104,
+        "raw_predictions": 134,
+        "input_shape": [
+          1,
+          3,
+          480,
+          768
+        ],
+        "fast_path": "cuda-preprocess+graph"
+      },
+      "comparison": {
+        "onnx_recall_drop_vs_pytorch": 0.0,
+        "tensorrt_recall_drop_vs_pytorch": 0.0
+      },
+      "live": {
+        "duration_seconds": 12.070300528001098,
+        "capture_median_fps": 60.14711356222269,
+        "inference_average_fps": 56.042302874239354,
+        "latency_p95_ms": 34.70792100051767,
+        "tube_pose_hz": 29.662811829221397,
+        "tube_pose_valid_frames": 0,
+        "report": "artifacts/rgbd_smoke.json"
+      }
+    },
+    {
+      "width": 640,
+      "height": 416,
+      "engine": "models/ball_yolo26s_640x416_fp16.engine",
+      "benchmark": {
+        "pure_fps": 92.5791,
+        "gpu_mean_ms": 10.8005,
+        "command": [
+          "/usr/src/tensorrt/bin/trtexec",
+          "--loadEngine=/home/d/2026ti/2026H/ball_yolo26s_nx/models/ball_yolo26s_640x416_fp16.engine",
+          "--warmUp=1000",
+          "--duration=10",
+          "--iterations=10000",
+          "--useCudaGraph",
+          "--noDataTransfers"
+        ]
+      },
+      "pytorch_metrics": {
+        "threshold": 0.7799898386001587,
+        "tp": 101,
+        "fp": 0,
+        "fn": 3,
+        "precision": 1.0,
+        "recall": 0.9711538461538461,
+        "f1": 0.9853658536585366,
+        "map50": 0.9999057048561999,
+        "images": 17,
+        "ground_truth_objects": 104,
+        "raw_predictions": 121
+      },
+      "onnx_metrics": {
+        "threshold": 0.7799898386001587,
+        "tp": 101,
+        "fp": 0,
+        "fn": 3,
+        "precision": 1.0,
+        "recall": 0.9711538461538461,
+        "f1": 0.9853658536585366,
+        "map50": 0.9999057048561999,
+        "images": 17,
+        "ground_truth_objects": 104,
+        "raw_predictions": 121,
+        "input_shape": [
+          1,
+          3,
+          416,
+          640
+        ],
+        "cpu_inference_mean_ms": 360.1664819413118
+      },
+      "metrics": {
+        "threshold": 0.7799898386001587,
+        "tp": 101,
+        "fp": 0,
+        "fn": 3,
+        "precision": 1.0,
+        "recall": 0.9711538461538461,
+        "f1": 0.9853658536585366,
+        "map50": 0.9999057048561999,
+        "images": 17,
+        "ground_truth_objects": 104,
+        "raw_predictions": 121,
+        "input_shape": [
+          1,
+          3,
+          416,
+          640
+        ],
+        "fast_path": "cuda-preprocess+graph"
+      },
+      "comparison": {
+        "onnx_recall_drop_vs_pytorch": 0.0,
+        "tensorrt_recall_drop_vs_pytorch": 0.0
+      },
+      "live": {
+        "duration_seconds": 12.044507280999824,
+        "capture_median_fps": 60.028421278246235,
+        "inference_average_fps": 59.248617341159914,
+        "latency_p95_ms": 26.286333000825834,
+        "tube_pose_hz": 30.007355092694034,
+        "tube_pose_valid_frames": 0,
+        "report": "artifacts/rgbd_smoke_640x416.json"
+      }
+    }
+  ]
+}

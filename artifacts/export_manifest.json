@@ -1,0 +1,17 @@
+{
+  "source_model": "/home/d/2026ti/2026H/ball_yolo26s_nx/models/ball_yolo26s_best.pt",
+  "candidates": [
+    {
+      "height": 480,
+      "width": 768,
+      "onnx": "/home/d/2026ti/2026H/ball_yolo26s_nx/models/ball_yolo26s_768x480_end2end.onnx",
+      "bytes": 38103282
+    },
+    {
+      "height": 416,
+      "width": 640,
+      "onnx": "/home/d/2026ti/2026H/ball_yolo26s_nx/models/ball_yolo26s_640x416_end2end.onnx",
+      "bytes": 38061282
+    }
+  ]
+}

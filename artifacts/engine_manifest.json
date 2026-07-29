@@ -1,0 +1,25 @@
+{
+  "tensorrt": "8.5.2.2",
+  "candidates": [
+    {
+      "width": 768,
+      "height": 480,
+      "onnx": "/home/d/2026ti/2026H/ball_yolo26s_nx/models/ball_yolo26s_768x480_end2end.onnx",
+      "onnx_sha256": "7f5c14ad53fffea00a23cdb4866f89f8837a81574cd8b54472d7cc0524dc9b62",
+      "engine": "/home/d/2026ti/2026H/ball_yolo26s_nx/models/ball_yolo26s_768x480_fp16.engine",
+      "engine_bytes": 21494596,
+      "engine_sha256": "17e62c9fdb4a67ccbac8d619898a77df7a18a4d7bb01175ea285705f89cdc95c",
+      "timing_cache": "/home/d/2026ti/2026H/ball_yolo26s_nx/models/ball_yolo26s_768x480_fp16.engine.cache"
+    },
+    {
+      "width": 640,
+      "height": 416,
+      "onnx": "/home/d/2026ti/2026H/ball_yolo26s_nx/models/ball_yolo26s_640x416_end2end.onnx",
+      "onnx_sha256": "4808b40e1e892896d94b09cb9e9998bf0551a855d15d2141ac8cbf8d0ba79fb3",
+      "engine": "/home/d/2026ti/2026H/ball_yolo26s_nx/models/ball_yolo26s_640x416_fp16.engine",
+      "engine_bytes": 21564282,
+      "engine_sha256": "0647e6ffcb6b2d53526787131b29a4935547a23fc589a41883de724e3cb44bce",
+      "timing_cache": "/home/d/2026ti/2026H/ball_yolo26s_nx/models/ball_yolo26s_640x416_fp16.engine.cache"
+    }
+  ]
+}

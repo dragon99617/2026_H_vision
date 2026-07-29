@@ -1,0 +1,8 @@
+path: /home/d/2026ti/2026H/ball_yolo26s_nx/dataset
+train:
+  - images/train
+  - augmented/images
+val: images/val
+test: images/test
+names:
+  0: ball

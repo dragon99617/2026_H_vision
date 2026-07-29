@@ -1,0 +1,14 @@
+{
+  "model": "/home/d/2026ti/2026H/ball_yolo26s_nx/models/ball_yolo26s_best.pt",
+  "source_best": "/home/d/2026ti/2026H/ball_yolo26s_nx/artifacts/training/yolo26s_ball_batch2/weights/best.pt",
+  "pretrained": "/home/d/2026ti/2026H/ball_yolo26s_nx/models/yolo26s.pt",
+  "pretrained_sha256": "646f8bc3fe0a656803d95c294f7852321748cb29d13466a1af8862e2db384a1b",
+  "best_sha256": "2939b20ea295162f9514177cd16f451f4bebeb626a5739316d9dd9598d5e5c96",
+  "batch": 2,
+  "imgsz": 640,
+  "epochs_requested": 150,
+  "epochs_completed": 75,
+  "best_epoch": 45,
+  "early_stopped": true,
+  "save_dir": "/home/d/2026ti/2026H/ball_yolo26s_nx/artifacts/training/yolo26s_ball_batch2"
+}
