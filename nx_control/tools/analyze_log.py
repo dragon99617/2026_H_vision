@@ -40,6 +40,21 @@ def analyze(path: Path) -> Dict[str, object]:
     solve_times = [
         finite(row, "mpc_ms") for row in rows if math.isfinite(finite(row, "mpc_ms"))
     ]
+    build_times = [
+        finite(row, "qp_build_ms")
+        for row in rows
+        if math.isfinite(finite(row, "qp_build_ms"))
+    ]
+    backend_solve_times = [
+        finite(row, "qp_backend_solve_ms")
+        for row in rows
+        if math.isfinite(finite(row, "qp_backend_solve_ms"))
+    ]
+    iteration_times = [
+        finite(row, "qp_iteration_us")
+        for row in rows
+        if math.isfinite(finite(row, "qp_iteration_us"))
+    ]
     vision_ages = [
         finite(row, "vision_age_ms")
         for row in rows
@@ -64,6 +79,10 @@ def analyze(path: Path) -> Dict[str, object]:
         "angle_saturation_ratio": sum(value >= theta_limit * 0.99 for value in theta) / count,
         "mpc_solve_p95_ms": percentile(solve_times, 95.0),
         "mpc_solve_max_ms": max(solve_times, default=float("nan")),
+        "qp_build_p95_ms": percentile(build_times, 95.0),
+        "qp_backend_solve_p95_ms": percentile(backend_solve_times, 95.0),
+        "qp_iteration_p95_us": percentile(iteration_times, 95.0),
+        "qp_iteration_max_us": max(iteration_times, default=float("nan")),
         "mpc_over_3ms_ratio": sum(value > 3.0 for value in solve_times) / count,
         "mpc_over_10ms_count": sum(value > 10.0 for value in solve_times),
         "vision_age_p95_ms": percentile(vision_ages, 95.0),

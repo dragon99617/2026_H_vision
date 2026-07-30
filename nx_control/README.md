@@ -10,13 +10,16 @@ DMMC 管道实际角和底盘状态，输出 `tube-control-v3`，不控制车轮
 - 对底盘实际加速度的一阶低延迟滤波，以及基于 `a_ref + jerk_ref·t` 的预测域前馈；
 - 状态 `[x, x_dot, d]` 的卡尔曼观测器、置信度动态测量噪声、3σ门限和至少
   250 ms历史；v3迟到测量在曝光时刻更新后重放；
-- 状态 `[x, x_dot, d, u_actual]`、执行机构一阶动态、增量输入决策的30步 MPC；
+- 状态 `[x, x_dot, d, u_actual]`、执行机构一阶动态、增量输入决策的40步 MPC；
   角度、角速度硬约束与球位置软约束均直接进入QP；
 - OSQP 0.6.x生产后端，以及无需外部求解器、仅供构建和回归测试的稠密ADMM后端；
 - 单次QP失败使用上一最优序列移位，连续失败切换前馈+状态反馈备用控制，持续失败
   请求停车；视觉丢失100～250 ms先进入0° HOLD软保护，超过250 ms或软边界存在
   当前/预测风险时进入锁存SAFE；底盘、DMMC超时和±11.5 cm边界也会触发安全锁存；
-- 静态 `0→+5→-5 cm`、中心保持、指定位置保持、随底盘阶段切换的任务管理；
+- Task3 使用全预测域可预览的五次连续轨迹完成 `0→+5→-5 cm`，端点采用位置、
+  速度和实测管角联合稳定判据；其余任务支持中心保持、指定位置保持和底盘阶段切换；
+- Task3 根据实测静摩擦死区进行带滞回的静/动摩擦前馈，突破后平滑降补偿，
+  目标死区只保留 `-0.15°` 平衡偏置；MPC、观察器与绝对管角命令使用分离的角度分量；
 - 每周期 CSV（含预测位置序列）、离线重放和误差/饱和/求解耗时统计。
 
 线协议的唯一字节级定义见 [PROTOCOL.md](PROTOCOL.md)。
@@ -32,6 +35,14 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j2
 cd build && ctest --output-on-failure
 ```
+
+`Release`构建会显式启用GCC `-O3`、LTO，并默认用`-mcpu=native`针对执行构建的
+Jetson CPU优化；若在一台机器上交叉构建给不同CPU运行，可加
+`-DNX_CONTROL_NATIVE_OPTIMIZATION=OFF`。
+
+MPC在控制循环启动前完成OSQP预热，并缓存不随状态变化的Hessian和约束矩阵；
+稳态周期只更新梯度与上下界。默认仍允许最多250次迭代，使用0.0125收敛容差，
+每10次迭代检查一次终止条件和自适应rho，避免用过低的迭代上限换取表面耗时。
 
 配置中的 `require_osqp=true` 会让误用非 OSQP 版本的程序在启动时直接报错；正常
 启动还会打印 `MPC backend: osqp (required)`。若只为移植或回归测试而明确需要
@@ -108,8 +119,9 @@ python3 run.py --no-serial --protocol tube-v3 \
 
 任务参数：
 
-- `--task 3`：赛题要求3，静止时执行 `O→+5→-5 cm`，到达每个端点并稳定
-  200 ms 后切换/完成；
+- `--task 3`：赛题要求3，静止时按限速、限加速度和限 jerk 的五次轨迹执行
+  `O→+5→-5 cm`；轨迹到达端点后，位置误差不超过4 mm、速度不超过5 mm/s、
+  实际管角处于平衡偏置±0.2°内并连续保持500 ms，才切换/完成；
 - `--task 45`：赛题要求4和5，车辆行驶阶段始终保持中心 `O`（`4`和`5`
   也是该 task 的别名）；
 - `--task 6 --target-cm N`：赛题要求6，车辆行驶阶段保持指定位置 `N` cm；
@@ -172,13 +184,18 @@ a_actual_m_s2,a_ref_m_s2,jerk_ref_m_s3,motion_phase
 时间必须单调，`vision_status` 为0/1/2，`motion_phase` 为0–4。例如：
 
 ```bash
-./build/ball_nx_replay capture.csv replay-output.csv config/nx-control.conf
+./build/ball_nx_replay capture.csv replay-output.csv config/nx-control.conf task3
 python3 tools/analyze_log.py replay-output.csv --json replay-metrics.json
 ```
 
 正式测试应同时保留视觉侧 `--position-csv`、控制CSV和视频。控制日志中的
 `vision_age_ms`、`mpc_ms`、`prediction_m`、实际管道角、底盘阶段和故障字段足以
-复现观测与控制决策。日志还直接记录`wire_control_state`、`wire_flags`、
+复现观测与控制决策。Task3还记录`task3_stage`、三阶一致的`planned_*`参考、
+三个`settle_*`判据及保持时间、`theta_mpc/bias/friction/command_deg`、
+`friction_mode/direction`和`theta_actual_deg`，可直接定位换向、突破、滚动降补偿
+及最终死区。`mpc_ms`进一步拆分为`qp_build_ms`、`qp_setup_ms`、
+`qp_update_ms`和`qp_backend_solve_ms`，`qp_iteration_us`记录OSQP单次ADMM迭代
+耗时。日志还直接记录`wire_control_state`、`wire_flags`、
 `dmmc_controller_state`、`safety_latched`、`safety_event_id`和
 `last_stop_reason`；安全锁存/解除行会立即flush，不依赖每秒一次的终端摘要。
 
@@ -201,5 +218,6 @@ NX的摆杆命令硬限幅为`±4.0°`，角速度限制为`2°/s`，与DMMC02�
 `acceleration_limit_deg_s2=5.0`，但这些固件参数不属于本NX工程。
 
 `HoldTarget`在位置误差小于4 mm且估计速度小于15 mm/s时进入带滞回的静止区；
-位置误差超过8 mm才退出。静止区内暂停MPC追踪，管道角度按2°/s限制缓慢回到0°，
-利用管壁摩擦保持小球，避免追逐毫米级位置误差。
+位置误差超过8 mm才退出。非Task3静止区内暂停MPC追踪，管道角度按2°/s限制缓慢
+回到0°。Task3在更严格的2.5 mm、5 mm/s死区内撤销方向摩擦补偿并回到
+`-0.15°`平衡偏置，避免反复突破静摩擦形成极限环。

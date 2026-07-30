@@ -22,6 +22,9 @@ struct QpProblem {
 struct QpResult {
   bool solved = false;
   int iterations = 0;
+  double setup_time_ms = 0.0;
+  double update_time_ms = 0.0;
+  double solve_time_ms = 0.0;
   Eigen::VectorXd primal;
   std::string status;
 };
@@ -68,18 +71,21 @@ class BallMpc {
   const char* backend_name() const { return solver_->name(); }
 
  private:
+  void warm_up();
   Eigen::Matrix4d terminal_cost() const;
   QpProblem build_problem(const std::array<double, 4>& state,
                           double previous_command_m_s2,
                           const std::vector<ReferencePoint>& reference,
                           const std::vector<double>& chassis_acceleration_ref,
                           std::vector<Eigen::RowVectorXd>& position_sensitivity,
-                          std::vector<double>& position_constant) const;
+                          std::vector<double>& position_constant);
 
   ControlConfig config_;
   std::unique_ptr<QpSolver> solver_;
   Eigen::Matrix4d terminal_cost_ = Eigen::Matrix4d::Identity();
   std::vector<double> last_command_sequence_;
+  Eigen::MatrixXd cached_hessian_;
+  Eigen::MatrixXd cached_constraint_;
   QpProblem last_problem_;
 };
 

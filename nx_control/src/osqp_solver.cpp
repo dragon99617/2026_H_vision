@@ -18,23 +18,42 @@ class OsqpSolver final : public QpSolver {
   const char* name() const override { return "osqp"; }
 
   QpResult solve(const QpProblem& problem) override {
+    bool setup_this_call = false;
     if (workspace_ == nullptr) {
-      if (!setup(problem)) return QpResult{false, 0, {}, "setup_failed"};
+      if (!setup(problem)) {
+        QpResult result;
+        result.status = "setup_failed";
+        return result;
+      }
+      setup_this_call = true;
     } else if (problem.hessian.rows() != variables_ || problem.constraint.rows() != constraints_) {
       cleanup();
-      if (!setup(problem)) return QpResult{false, 0, {}, "setup_failed"};
+      if (!setup(problem)) {
+        QpResult result;
+        result.status = "setup_failed";
+        return result;
+      }
+      setup_this_call = true;
     } else {
       copy_vector(problem.gradient, q_);
       copy_vector(problem.lower, lower_);
       copy_vector(problem.upper, upper_);
       if (osqp_update_lin_cost(workspace_, q_.data()) != 0 ||
           osqp_update_bounds(workspace_, lower_.data(), upper_.data()) != 0) {
-        return QpResult{false, 0, {}, "update_failed"};
+        QpResult result;
+        result.status = "update_failed";
+        return result;
       }
     }
     osqp_solve(workspace_);
     QpResult result;
     result.iterations = static_cast<int>(workspace_->info->iter);
+#ifdef PROFILING
+    result.setup_time_ms =
+        setup_this_call ? 1000.0 * workspace_->info->setup_time : 0.0;
+    result.update_time_ms = 1000.0 * workspace_->info->update_time;
+    result.solve_time_ms = 1000.0 * workspace_->info->solve_time;
+#endif
     result.solved = workspace_->info->status_val == OSQP_SOLVED ||
                     workspace_->info->status_val == OSQP_SOLVED_INACCURATE;
     result.status = workspace_->info->status;
@@ -104,10 +123,16 @@ class OsqpSolver final : public QpSolver {
     settings_->verbose = false;
     settings_->warm_start = true;
     settings_->polish = false;
+    settings_->rho = config_.qp_rho;
+    settings_->adaptive_rho_interval =
+        config_.qp_adaptive_rho_interval;
+    settings_->scaled_termination =
+        config_.qp_scaled_termination ? 1 : 0;
     settings_->max_iter = config_.qp_max_iterations;
     settings_->eps_abs = config_.qp_eps_abs;
     settings_->eps_rel = config_.qp_eps_rel;
-    settings_->check_termination = 5;
+    settings_->check_termination =
+        config_.qp_check_termination_interval;
 #ifdef PROFILING
     settings_->time_limit = config_.solver_deadline_ms / 1000.0;
 #endif

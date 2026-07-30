@@ -19,7 +19,8 @@ NxController::NxController(const ControlConfig& config, std::unique_ptr<QpSolver
       observer_(config),
       chassis_sync_(config),
       mpc_(config, std::move(solver)),
-      task_manager_(config) {}
+      task_manager_(config),
+      friction_compensator_(config) {}
 
 void NxController::configure_task(TaskMode mode, double target_m, bool start_immediately,
                                   bool start_on_chassis_event) {
@@ -30,7 +31,11 @@ void NxController::start_task(double now_s) {
   safety_latched_ = false;
   safety_fault_latched_ = false;
   clear_comm_warning_pending_ = true;
-  previous_command_u_ = 0.0;
+  previous_mpc_u_ = 0.0;
+  previous_theta_command_rad_ = 0.0;
+  previous_model_compensation_rad_ = 0.0;
+  previous_model_compensation_active_ = false;
+  friction_compensator_.reset();
   solver_failures_ = 0;
   first_solver_failure_s_ = -1.0;
   task_manager_.start(now_s);
@@ -48,7 +53,11 @@ void NxController::reset(double now_s) {
   chassis_clock_.reset();
   v2_clock_initialized_ = false;
   latest_visual_position_valid_ = false;
-  previous_command_u_ = 0.0;
+  previous_mpc_u_ = 0.0;
+  previous_theta_command_rad_ = 0.0;
+  previous_model_compensation_rad_ = 0.0;
+  previous_model_compensation_active_ = false;
+  friction_compensator_.reset();
   solver_failures_ = 0;
   first_solver_failure_s_ = -1.0;
   safety_latched_ = false;
@@ -89,9 +98,10 @@ void NxController::ingest_vision(VisionMeasurement measurement) {
   // Vision and controller use CLOCK_MONOTONIC. Propagate to an inter-tick exposure time.
   measurement.capture_time_s = std::min(measurement.capture_time_s, measurement.receive_time_s);
   if (measurement.capture_time_s > observer_.time_s()) {
-    const double actual_u = have_tube_status_
-                                ? kGravity * std::tan(tube_status_.theta_actual_rad)
-                                : previous_command_u_;
+    const double actual_u =
+        have_tube_status_
+            ? model_u_from_actual_theta(tube_status_.theta_actual_rad)
+            : previous_mpc_u_;
     const double acceleration =
         chassis_sync_.delay_compensated_actual_acceleration(measurement.receive_time_s);
     observer_.predict(measurement.capture_time_s, actual_u, acceleration);
@@ -114,9 +124,10 @@ void NxController::ingest_tube_status(const TubeStatus& status) {
   TubeStatus synchronized = status;
   synchronized.sample_time_s =
       dmmc_clock_.to_local_seconds(status.dmmc_time_ms, status.receive_time_s);
-  const double previous_u = have_tube_status_
-                                ? kGravity * std::tan(tube_status_.theta_actual_rad)
-                                : previous_command_u_;
+  const double previous_u =
+      have_tube_status_
+          ? model_u_from_actual_theta(tube_status_.theta_actual_rad)
+          : previous_mpc_u_;
   observer_.predict(synchronized.sample_time_s, previous_u,
                     chassis_sync_.delay_compensated_actual_acceleration(status.receive_time_s));
   tube_status_ = synchronized;
@@ -134,8 +145,10 @@ void NxController::ingest_chassis_state(const ChassisState& state) {
   ChassisState synchronized = state;
   synchronized.sample_time_s =
       chassis_clock_.to_local_seconds(state.chassis_time_ms, state.receive_time_s);
-  const double actual_u = have_tube_status_ ? kGravity * std::tan(tube_status_.theta_actual_rad)
-                                            : previous_command_u_;
+  const double actual_u =
+      have_tube_status_
+          ? model_u_from_actual_theta(tube_status_.theta_actual_rad)
+          : previous_mpc_u_;
   observer_.predict(synchronized.sample_time_s, actual_u,
                     chassis_sync_.delay_compensated_actual_acceleration(state.receive_time_s));
   last_chassis_sequence_ = state.sequence;
@@ -143,12 +156,36 @@ void NxController::ingest_chassis_state(const ChassisState& state) {
   chassis_sync_.ingest(synchronized);
 }
 
-double NxController::rate_limit_and_clamp(double requested_u) {
-  const double hard = kGravity * std::tan(config_.theta_limit_rad);
-  const double delta = kGravity * std::tan(config_.theta_rate_limit_rad_s * config_.period_s);
-  requested_u = std::clamp(requested_u, previous_command_u_ - delta,
-                           previous_command_u_ + delta);
-  return std::clamp(requested_u, -hard, hard);
+double NxController::model_u_from_actual_theta(double theta_actual_rad) const {
+  const double dynamic_theta_rad =
+      previous_model_compensation_active_
+          ? theta_actual_rad - previous_model_compensation_rad_
+          : theta_actual_rad;
+  return kGravity * std::tan(dynamic_theta_rad);
+}
+
+double NxController::rate_limit_mpc_and_clamp(double requested_u) {
+  double requested_theta_rad = std::atan2(requested_u, kGravity);
+  const double previous_theta_rad = std::atan2(previous_mpc_u_, kGravity);
+  const double max_step_rad =
+      config_.theta_rate_limit_rad_s * config_.period_s;
+  requested_theta_rad =
+      std::clamp(requested_theta_rad, previous_theta_rad - max_step_rad,
+                 previous_theta_rad + max_step_rad);
+  requested_theta_rad =
+      std::clamp(requested_theta_rad, -config_.theta_limit_rad,
+                 config_.theta_limit_rad);
+  return kGravity * std::tan(requested_theta_rad);
+}
+
+double NxController::rate_limit_final_angle(double requested_theta_rad) const {
+  const double max_step_rad =
+      config_.theta_rate_limit_rad_s * config_.period_s;
+  return std::clamp(
+      std::clamp(requested_theta_rad,
+                 previous_theta_command_rad_ - max_step_rad,
+                 previous_theta_command_rad_ + max_step_rad),
+      -config_.theta_limit_rad, config_.theta_limit_rad);
 }
 
 double NxController::fallback_command(const ObserverState& estimate,
@@ -201,8 +238,10 @@ ControlOutput NxController::tick(double now_s,
   const bool chassis_valid = chassis_sync_.valid(now_s);
   const double chassis_acceleration =
       chassis_valid ? chassis_sync_.delay_compensated_actual_acceleration(now_s) : 0.0;
-  const double actual_u = have_tube_status_ ? kGravity * std::tan(tube_status_.theta_actual_rad)
-                                            : previous_command_u_;
+  const double actual_u =
+      have_tube_status_
+          ? model_u_from_actual_theta(tube_status_.theta_actual_rad)
+          : previous_mpc_u_;
   observer_.predict(now_s, actual_u, chassis_acceleration);
   last_tick_s_ = now_s;
 
@@ -217,8 +256,24 @@ ControlOutput NxController::tick(double now_s,
                            ? 1000.0 * std::max(0.0, now_s - tube_status_.receive_time_s)
                            : std::numeric_limits<double>::infinity();
 
-  const ChassisState* chassis = chassis_valid ? &chassis_sync_.latest() : nullptr;
-  output.reference = task_manager_.update(now_s, output.estimate, chassis);
+  const double vision_age_s = output.vision_age_ms / 1000.0;
+  const bool dmmc_stale =
+      !have_tube_status_ ||
+      output.dmmc_age_ms > config_.dmmc_stale_s * 1000.0 ||
+      tube_status_.faults != 0U;
+  const bool task_feedback_valid =
+      !dmmc_stale && vision_age_s <= config_.vision_loss_hold_s;
+  const ChassisState* chassis =
+      chassis_valid ? &chassis_sync_.latest() : nullptr;
+  output.reference =
+      task_manager_.update(now_s, output.estimate, chassis,
+                           have_tube_status_ ? &tube_status_ : nullptr,
+                           task_feedback_valid);
+  output.task3_stage = task_manager_.task3_stage();
+  output.settle_position_ok = task_manager_.settle_position_ok();
+  output.settle_velocity_ok = task_manager_.settle_velocity_ok();
+  output.settle_theta_ok = task_manager_.settle_theta_ok();
+  output.settle_elapsed_ms = 1000.0 * task_manager_.settle_elapsed_s();
   const bool contest3_waiting_for_start =
       task_manager_.mode() == TaskMode::Contest3 && task_manager_.state() == TaskState::Idle;
   const bool target_hold_deadband = task_manager_.target_hold_deadband_active();
@@ -230,16 +285,12 @@ ControlOutput NxController::tick(double now_s,
                                  : acceleration_forecast.front() +
                                        output.reference.acceleration_m_s2 / config_.rolling_lambda;
 
-  const double vision_age_s = output.vision_age_ms / 1000.0;
   const bool vision_soft_hold =
       !contest3_waiting_for_start &&
       vision_age_s >= config_.vision_loss_hold_s &&
       vision_age_s <= config_.vision_loss_safe_s;
   const bool vision_hard_lost =
       !contest3_waiting_for_start && vision_age_s > config_.vision_loss_safe_s;
-  const bool dmmc_stale = !have_tube_status_ ||
-                          output.dmmc_age_ms > config_.dmmc_stale_s * 1000.0 ||
-                          tube_status_.faults != 0U;
   const bool chassis_stale = !chassis_valid;
   const bool chassis_fresh_required = task_manager_.mode() != TaskMode::Contest3;
   const bool chassis_gate_failed = chassis_fresh_required && chassis_stale;
@@ -265,8 +316,18 @@ ControlOutput NxController::tick(double now_s,
                                           output.estimate.velocity_m_s,
                                           output.estimate.disturbance_m_s2, actual_u};
     const MpcResult result =
-        mpc_.solve(mpc_state, previous_command_u_, reference, acceleration_forecast);
+        mpc_.solve(mpc_state, previous_mpc_u_, reference,
+                   acceleration_forecast);
     output.mpc_solve_ms = result.solve_time_ms;
+    output.qp_build_ms = result.qp_build_time_ms;
+    output.qp_setup_ms = result.qp_setup_time_ms;
+    output.qp_update_ms = result.qp_update_time_ms;
+    output.qp_backend_solve_ms = result.qp_backend_solve_time_ms;
+    output.qp_iteration_us =
+        result.iterations > 0
+            ? 1000.0 * result.qp_backend_solve_time_ms /
+                  static_cast<double>(result.iterations)
+            : 0.0;
     output.max_predicted_slack_m = result.max_slack_m;
     output.solver_iterations = result.iterations;
     output.predicted_position_m = result.predicted_position;
@@ -348,9 +409,44 @@ ControlOutput NxController::tick(double now_s,
 
   const bool force_zero_command =
       safety_latched_ || vision_soft_hold || dmmc_stale || contest3_waiting_for_start;
-  requested_u = force_zero_command ? 0.0 : rate_limit_and_clamp(requested_u);
-  previous_command_u_ = requested_u;
+  requested_u =
+      force_zero_command ? 0.0 : rate_limit_mpc_and_clamp(requested_u);
+
+  const bool task3_compensation_active =
+      !force_zero_command && !output.request_stop &&
+      task_manager_.mode() == TaskMode::Contest3 &&
+      (task_manager_.state() == TaskState::StaticMove ||
+       task_manager_.state() == TaskState::HoldTarget);
+  const double target_position_error_m =
+      task_manager_.target_m() - output.estimate.position_m;
+  const FrictionCompensation friction = friction_compensator_.update(
+      now_s, task3_compensation_active, target_position_error_m,
+      output.estimate.velocity_m_s, requested_u,
+      output.reference.velocity_m_s);
+  if (friction.target_deadband) requested_u = 0.0;
+
+  const double theta_mpc_rad =
+      force_zero_command ? 0.0 : std::atan2(requested_u, kGravity);
+  const double theta_bias_rad =
+      task3_compensation_active ? config_.task3_theta_bias_rad : 0.0;
+  const double theta_friction_rad =
+      task3_compensation_active ? friction.theta_friction_rad : 0.0;
+  const double desired_theta_rad =
+      theta_mpc_rad + theta_bias_rad + theta_friction_rad;
+  const double theta_command_rad =
+      force_zero_command ? 0.0 : rate_limit_final_angle(desired_theta_rad);
+
+  previous_mpc_u_ = requested_u;
+  previous_theta_command_rad_ = theta_command_rad;
+  previous_model_compensation_active_ = task3_compensation_active;
+  previous_model_compensation_rad_ =
+      task3_compensation_active ? theta_command_rad - theta_mpc_rad : 0.0;
   output.u_command_m_s2 = requested_u;
+  output.theta_mpc_rad = theta_mpc_rad;
+  output.theta_bias_rad = theta_bias_rad;
+  output.theta_friction_rad = theta_friction_rad;
+  output.friction_mode = friction.mode;
+  output.friction_direction = friction.direction;
   output.solver_failures = solver_failures_;
   output.safety_latched = safety_latched_;
   output.safety_event_id = safety_event_id_;
@@ -368,7 +464,7 @@ ControlOutput NxController::tick(double now_s,
   }
   command.source_frame_id = last_vision_frame_id_;
   command.nx_time_ms = static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
-  command.theta_cmd_rad = std::atan2(requested_u, kGravity);
+  command.theta_cmd_rad = theta_command_rad;
   command.theta_rate_limit_rad_s = config_.theta_rate_limit_rad_s;
   command.ttl_ms = 60;
   command.control_state =

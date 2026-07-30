@@ -1,14 +1,28 @@
 {
   "model": "/home/d/2026ti/2026H/ball_yolo26s_nx/models/ball_yolo26s_best.pt",
-  "source_best": "/home/d/2026ti/2026H/ball_yolo26s_nx/artifacts/training/yolo26s_ball_batch2/weights/best.pt",
-  "pretrained": "/home/d/2026ti/2026H/ball_yolo26s_nx/models/yolo26s.pt",
+  "model_sha256": "2e915c252e48742fd3482b878655753dc1cc1b6150a0d5ee6266a4aa47a42e96",
+  "pretrained_model": "/home/d/2026ti/2026H/ball_yolo26s_nx/models/yolo26s.pt",
   "pretrained_sha256": "646f8bc3fe0a656803d95c294f7852321748cb29d13466a1af8862e2db384a1b",
-  "best_sha256": "2939b20ea295162f9514177cd16f451f4bebeb626a5739316d9dd9598d5e5c96",
+  "source_best": "/home/d/2026ti/2026H/ball_yolo26s_nx/artifacts/training/yolo26s_ball_batch2/weights/best.pt",
   "batch": 2,
   "imgsz": 640,
   "epochs_requested": 150,
-  "epochs_completed": 75,
-  "best_epoch": 45,
+  "epochs_completed": 69,
+  "best_epoch": 39,
   "early_stopped": true,
+  "dataset_source": "/home/d/2026ti/2026H/ball_yolo26s_nx/data_new",
+  "dataset_modalities": "RGB *_color.jpg only; depth_mm/depth_vis excluded",
+  "dataset_split": {
+    "train": 69,
+    "validation": 15,
+    "test": 15,
+    "method": "chronological contiguous"
+  },
+  "best_validation": {
+    "precision": 1.0,
+    "recall": 1.0,
+    "map50": 0.995,
+    "map50_95": 0.80779
+  },
   "save_dir": "/home/d/2026ti/2026H/ball_yolo26s_nx/artifacts/training/yolo26s_ball_batch2"
 }

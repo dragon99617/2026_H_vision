@@ -1,4 +1,4 @@
 {
-  "confidence": 0.7799898386001587,
-  "selection_rule": "max_precision_at_recall_gte_0.970"
+  "confidence": 0.6,
+  "selection_rule": "fixed_confidence"
 }

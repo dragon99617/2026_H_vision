@@ -27,15 +27,25 @@ double number(const std::vector<std::string>& row, std::size_t index, double fal
 
 int main(int argc, char** argv) {
   try {
-    if (argc < 2 || argc > 4) {
-      std::cerr << "usage: ball_nx_replay INPUT.csv [OUTPUT.csv] [CONFIG]\n";
+    if (argc < 2 || argc > 5) {
+      std::cerr
+          << "usage: ball_nx_replay INPUT.csv [OUTPUT.csv] [CONFIG] [TASK]\n"
+             "  TASK: center (default) or task3\n";
       return 2;
     }
     const std::string output_path = argc >= 3 ? argv[2] : "replay-output.csv";
     const std::string config_path = argc >= 4 ? argv[3] : "config/nx-control.conf";
+    const std::string task_name = argc >= 5 ? argv[4] : "center";
+    const nx_control::TaskMode task_mode =
+        task_name == "task3" || task_name == "3"
+            ? nx_control::TaskMode::Contest3
+            : nx_control::TaskMode::HoldCenter;
+    if (task_name != "center" && task_name != "task3" && task_name != "3") {
+      throw std::runtime_error("replay TASK must be center or task3");
+    }
     const nx_control::ControlConfig config = nx_control::load_config(config_path);
     nx_control::NxController controller(config);
-    controller.configure_task(nx_control::TaskMode::HoldCenter, 0.0, true);
+    controller.configure_task(task_mode, 0.0, true);
     nx_control::CsvLogger logger;
     if (!logger.open(output_path)) throw std::runtime_error("cannot open replay output");
     std::ifstream input(argv[1]);

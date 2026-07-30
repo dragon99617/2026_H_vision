@@ -42,6 +42,13 @@ enum class TaskMode : std::uint8_t {
   Contest45 = 6,  // H problem requirements 4/5: hold O while driving.
   Contest6 = 7,   // H problem requirement 6: hold a selected point while driving.
 };
+enum class FrictionMode : std::uint8_t {
+  Hold = 0,
+  BreakawayPositive = 1,
+  BreakawayNegative = 2,
+  RollingPositive = 3,
+  RollingNegative = 4,
+};
 
 struct VisionMeasurement {
   std::uint32_t frame_id = 0;
@@ -137,6 +144,10 @@ struct MpcResult {
   bool timed_out = false;
   int iterations = 0;
   double solve_time_ms = 0.0;
+  double qp_build_time_ms = 0.0;
+  double qp_setup_time_ms = 0.0;
+  double qp_update_time_ms = 0.0;
+  double qp_backend_solve_time_ms = 0.0;
   double command_m_s2 = 0.0;
   double max_slack_m = 0.0;
   std::vector<double> command_sequence;
@@ -148,12 +159,27 @@ struct ControlOutput {
   ControlCommand command;
   ObserverState estimate;
   ReferencePoint reference;
+  int task3_stage = -1;
+  bool settle_position_ok = false;
+  bool settle_velocity_ok = false;
+  bool settle_theta_ok = false;
+  double settle_elapsed_ms = 0.0;
   double u_command_m_s2 = 0.0;
+  double theta_mpc_rad = 0.0;
+  double theta_bias_rad = 0.0;
+  double theta_friction_rad = 0.0;
+  FrictionMode friction_mode = FrictionMode::Hold;
+  int friction_direction = 0;
   double acceleration_used_m_s2 = 0.0;
   double vision_age_ms = std::numeric_limits<double>::infinity();
   double chassis_age_ms = std::numeric_limits<double>::infinity();
   double dmmc_age_ms = std::numeric_limits<double>::infinity();
   double mpc_solve_ms = 0.0;
+  double qp_build_ms = 0.0;
+  double qp_setup_ms = 0.0;
+  double qp_update_ms = 0.0;
+  double qp_backend_solve_ms = 0.0;
+  double qp_iteration_us = 0.0;
   double max_predicted_slack_m = 0.0;
   int solver_iterations = 0;
   int solver_failures = 0;
@@ -172,18 +198,37 @@ struct ControlConfig {
   double actuator_tau_s = 0.045;
   double actuator_delay_s = 0.0;
   double rolling_lambda = kRollingLambda;
-  int horizon = 30;
+  int horizon = 40;
   double theta_limit_rad = 4.0 * 3.14159265358979323846 / 180.0;
   double theta_rate_limit_rad_s = 2.0 * 3.14159265358979323846 / 180.0;
   double position_soft_limit_m = 0.105;
   double position_safe_limit_m = 0.115;
   double position_scale_m = 0.010;
-  double velocity_scale_m_s = 0.015;
+  double velocity_scale_m_s = 0.010;
   double input_scale_m_s2 = 0.100;
   double delta_input_scale_m_s2 = 0.015;
   double hold_enter_position_error_m = 0.004;
   double hold_enter_velocity_m_s = 0.015;
   double hold_exit_position_error_m = 0.008;
+  double task3_reference_max_velocity_m_s = 0.030;
+  double task3_reference_max_acceleration_m_s2 = 0.060;
+  double task3_reference_max_jerk_m_s3 = 0.300;
+  double task3_settle_position_error_m = 0.004;
+  double task3_settle_velocity_m_s = 0.005;
+  double task3_settle_dwell_s = 0.500;
+  double task3_settle_theta_tolerance_rad =
+      0.2 * 3.14159265358979323846 / 180.0;
+  double task3_theta_bias_rad = -0.15 * 3.14159265358979323846 / 180.0;
+  double task3_theta_static_rad = 0.55 * 3.14159265358979323846 / 180.0;
+  double task3_theta_margin_rad = 0.05 * 3.14159265358979323846 / 180.0;
+  double task3_rolling_compensation_rad =
+      0.30 * 3.14159265358979323846 / 180.0;
+  double task3_friction_blend_time_s = 0.20;
+  double task3_friction_rolling_enter_velocity_m_s = 0.010;
+  double task3_friction_stationary_enter_velocity_m_s = 0.005;
+  double task3_friction_disable_position_error_m = 0.0025;
+  double task3_friction_disable_velocity_m_s = 0.005;
+  double task3_friction_request_acceleration_m_s2 = 0.005;
   double slack_weight = 5000.0;
   double measurement_sigma_m = 0.003;
   double predicted_min_confidence = 0.40;
@@ -209,8 +254,12 @@ struct ControlConfig {
   double fallback_disturbance_gain = 0.5;
   bool require_osqp = false;
   int qp_max_iterations = 250;
-  double qp_eps_abs = 1e-3;
-  double qp_eps_rel = 1e-3;
+  double qp_eps_abs = 1.25e-2;
+  double qp_eps_rel = 1.25e-2;
+  double qp_rho = 0.1;
+  int qp_adaptive_rho_interval = 10;
+  int qp_check_termination_interval = 10;
+  bool qp_scaled_termination = true;
 };
 
 }  // namespace nx_control

@@ -101,6 +101,20 @@ BallMpc::BallMpc(const ControlConfig& config, std::unique_ptr<QpSolver> solver)
     : config_(config), solver_(solver ? std::move(solver) : make_default_qp_solver(config)) {
   if (config_.horizon <= 0) throw std::invalid_argument("MPC horizon must be positive");
   terminal_cost_ = terminal_cost();
+  warm_up();
+}
+
+void BallMpc::warm_up() {
+  const auto horizon = static_cast<std::size_t>(config_.horizon);
+  const std::vector<ReferencePoint> reference(horizon);
+  const std::vector<double> chassis_acceleration_ref(horizon, 0.0);
+  std::vector<Eigen::RowVectorXd> position_sensitivity;
+  std::vector<double> position_constant;
+  QpProblem warmup_problem =
+      build_problem({0.0, 0.0, 0.0, 0.0}, 0.0, reference,
+                    chassis_acceleration_ref, position_sensitivity,
+                    position_constant);
+  (void)solver_->solve(warmup_problem);
 }
 
 Eigen::Matrix4d BallMpc::terminal_cost() const {
@@ -143,7 +157,7 @@ QpProblem BallMpc::build_problem(
     const std::vector<ReferencePoint>& reference,
     const std::vector<double>& chassis_acceleration_ref,
     std::vector<Eigen::RowVectorXd>& position_sensitivity,
-    std::vector<double>& position_constant) const {
+    std::vector<double>& position_constant) {
   const int n = config_.horizon;
   const int variables = 2 * n;
   const int constraints = 5 * n;
@@ -169,15 +183,22 @@ QpProblem BallMpc::build_problem(
   Eigen::Vector4d constant(state[0], state[1], state[3], previous_command_m_s2);
   Eigen::MatrixXd sensitivity = Eigen::MatrixXd::Zero(4, n);
   Eigen::RowVectorXd command_sensitivity = Eigen::RowVectorXd::Zero(n);
-  Eigen::MatrixXd hessian = Eigen::MatrixXd::Zero(variables, variables);
+  const bool build_structure = cached_hessian_.size() == 0;
+  Eigen::MatrixXd hessian =
+      build_structure ? Eigen::MatrixXd::Zero(variables, variables)
+                      : cached_hessian_;
   Eigen::VectorXd gradient = Eigen::VectorXd::Zero(variables);
   position_sensitivity.clear();
+  position_sensitivity.reserve(static_cast<std::size_t>(n));
   position_constant.clear();
+  position_constant.reserve(static_cast<std::size_t>(n));
 
   auto add_square = [&](const Eigen::RowVectorXd& row, double error, double scale,
                         double weight = 1.0) {
     const Eigen::RowVectorXd normalized = row / scale;
-    hessian += 2.0 * weight * normalized.transpose() * normalized;
+    if (build_structure) {
+      hessian += 2.0 * weight * normalized.transpose() * normalized;
+    }
     gradient += 2.0 * weight * (error / scale) * normalized.transpose();
   };
 
@@ -230,15 +251,22 @@ QpProblem BallMpc::build_problem(
                        final_target.acceleration_m_s2 / config_.rolling_lambda;
   Eigen::MatrixXd terminal_sensitivity = Eigen::MatrixXd::Zero(4, variables);
   terminal_sensitivity.leftCols(n) = sensitivity;
-  hessian += 2.0 * terminal_sensitivity.transpose() * terminal_cost_ * terminal_sensitivity;
+  if (build_structure) {
+    hessian += 2.0 * terminal_sensitivity.transpose() * terminal_cost_ *
+               terminal_sensitivity;
+  }
   gradient += 2.0 * terminal_sensitivity.transpose() * terminal_cost_ * terminal_error;
 
-  for (int step = 0; step < n; ++step) {
-    hessian(n + step, n + step) += 2.0 * config_.slack_weight;
+  if (build_structure) {
+    for (int step = 0; step < n; ++step) {
+      hessian(n + step, n + step) += 2.0 * config_.slack_weight;
+    }
+    hessian.diagonal().array() += 1e-8;
   }
-  hessian.diagonal().array() += 1e-8;
 
-  Eigen::MatrixXd constraint = Eigen::MatrixXd::Zero(constraints, variables);
+  Eigen::MatrixXd constraint =
+      build_structure ? Eigen::MatrixXd::Zero(constraints, variables)
+                      : cached_constraint_;
   Eigen::VectorXd lower = Eigen::VectorXd::Constant(
       constraints, -std::numeric_limits<double>::infinity());
   Eigen::VectorXd upper = Eigen::VectorXd::Constant(
@@ -246,30 +274,44 @@ QpProblem BallMpc::build_problem(
   const double u_limit = kGravity * std::tan(config_.theta_limit_rad);
   const double delta_limit = kGravity * std::tan(config_.theta_rate_limit_rad_s * dt);
   for (int step = 0; step < n; ++step) {
-    constraint(step, step) = 1.0;
+    if (build_structure) constraint(step, step) = 1.0;
     lower(step) = -delta_limit / du_scale;
     upper(step) = delta_limit / du_scale;
 
-    for (int input = 0; input <= step; ++input) constraint(n + step, input) = du_scale / u_scale;
+    if (build_structure) {
+      for (int input = 0; input <= step; ++input) {
+        constraint(n + step, input) = du_scale / u_scale;
+      }
+    }
     lower(n + step) = (-u_limit - previous_command_m_s2) / u_scale;
     upper(n + step) = (u_limit - previous_command_m_s2) / u_scale;
 
-    constraint(2 * n + step, n + step) = 1.0;
+    if (build_structure) {
+      constraint(2 * n + step, n + step) = 1.0;
+    }
     lower(2 * n + step) = 0.0;
 
-    constraint.block(3 * n + step, 0, 1, n) =
-        position_sensitivity[static_cast<std::size_t>(step)] / x_scale;
-    constraint(3 * n + step, n + step) = -1.0;
+    if (build_structure) {
+      constraint.block(3 * n + step, 0, 1, n) =
+          position_sensitivity[static_cast<std::size_t>(step)] / x_scale;
+      constraint(3 * n + step, n + step) = -1.0;
+    }
     upper(3 * n + step) =
         (config_.position_soft_limit_m - position_constant[static_cast<std::size_t>(step)]) /
         x_scale;
 
-    constraint.block(4 * n + step, 0, 1, n) =
-        -position_sensitivity[static_cast<std::size_t>(step)] / x_scale;
-    constraint(4 * n + step, n + step) = -1.0;
+    if (build_structure) {
+      constraint.block(4 * n + step, 0, 1, n) =
+          -position_sensitivity[static_cast<std::size_t>(step)] / x_scale;
+      constraint(4 * n + step, n + step) = -1.0;
+    }
     upper(4 * n + step) =
         (config_.position_soft_limit_m + position_constant[static_cast<std::size_t>(step)]) /
         x_scale;
+  }
+  if (build_structure) {
+    cached_hessian_ = hessian;
+    cached_constraint_ = constraint;
   }
   return QpProblem{std::move(hessian), std::move(gradient), std::move(constraint),
                    std::move(lower), std::move(upper)};
@@ -284,11 +326,18 @@ MpcResult BallMpc::solve(const std::array<double, 4>& state, double previous_com
   last_problem_ = build_problem(state, previous_command_m_s2, reference,
                                 chassis_acceleration_ref, position_sensitivity,
                                 position_constant);
+  const auto problem_built = std::chrono::steady_clock::now();
   QpResult qp = solver_->solve(last_problem_);
   const auto ended = std::chrono::steady_clock::now();
 
   MpcResult result;
   result.solve_time_ms = std::chrono::duration<double, std::milli>(ended - started).count();
+  result.qp_build_time_ms =
+      std::chrono::duration<double, std::milli>(problem_built - started)
+          .count();
+  result.qp_setup_time_ms = qp.setup_time_ms;
+  result.qp_update_time_ms = qp.update_time_ms;
+  result.qp_backend_solve_time_ms = qp.solve_time_ms;
   result.timed_out = result.solve_time_ms > config_.solver_deadline_ms;
   result.solved = qp.solved && !result.timed_out && qp.primal.size() == 2 * config_.horizon;
   result.iterations = qp.iterations;

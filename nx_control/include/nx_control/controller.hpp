@@ -1,5 +1,6 @@
 #pragma once
 
+#include "nx_control/friction_compensator.hpp"
 #include "nx_control/mpc.hpp"
 #include "nx_control/observer.hpp"
 #include "nx_control/task_manager.hpp"
@@ -32,7 +33,9 @@ class NxController {
   const char* mpc_backend_name() const { return mpc_.backend_name(); }
 
  private:
-  double rate_limit_and_clamp(double requested_u);
+  double model_u_from_actual_theta(double theta_actual_rad) const;
+  double rate_limit_mpc_and_clamp(double requested_u);
+  double rate_limit_final_angle(double requested_theta_rad) const;
   double fallback_command(const ObserverState& estimate, const ReferencePoint& reference,
                           double feedforward) const;
   bool hold_prediction_crosses_soft_boundary(const ObserverState& estimate,
@@ -49,6 +52,7 @@ class NxController {
   RemoteClockSynchronizer chassis_clock_;
   BallMpc mpc_;
   TaskManager task_manager_;
+  Task3FrictionCompensator friction_compensator_;
   TubeStatus tube_status_;
   bool have_tube_status_ = false;
   double last_tick_s_ = 0.0;
@@ -64,7 +68,10 @@ class NxController {
   double latest_visual_position_m_ = 0.0;
   bool latest_visual_position_valid_ = false;
   std::uint32_t command_id_ = 0;
-  double previous_command_u_ = 0.0;
+  double previous_mpc_u_ = 0.0;
+  double previous_theta_command_rad_ = 0.0;
+  double previous_model_compensation_rad_ = 0.0;
+  bool previous_model_compensation_active_ = false;
   int solver_failures_ = 0;
   double first_solver_failure_s_ = -1.0;
   bool safety_latched_ = false;

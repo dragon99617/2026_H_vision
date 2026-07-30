@@ -7,6 +7,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(NX_CONTROL_USE_OSQP "Use the OSQP 0.6.x MPC backend" ON)
 option(NX_CONTROL_BUILD_TESTS "Build the dependency-free unit tests" ON)
+option(NX_CONTROL_NATIVE_OPTIMIZATION
+       "Tune Release binaries for the Jetson CPU executing the build" ON)
 set(NX_CONTROL_OSQP_ROOT
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/osqp-0.6.3"
     CACHE PATH "OSQP 0.6.x installation prefix")
@@ -14,17 +16,32 @@ set(NX_CONTROL_OSQP_ROOT
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 find_package(Threads REQUIRED)
 
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    add_compile_options($<$<CONFIG:Release>:-O3>)
+    if(NX_CONTROL_NATIVE_OPTIMIZATION)
+        add_compile_options($<$<CONFIG:Release>:-mcpu=native>)
+    endif()
+endif()
+
 add_library(nx_control_core
     src/protocol.cpp
     src/observer.cpp
     src/mpc.cpp
     src/task_manager.cpp
+    src/friction_compensator.cpp
     src/controller.cpp
     src/io.cpp
 )
 target_include_directories(nx_control_core PUBLIC include)
 target_link_libraries(nx_control_core PUBLIC Eigen3::Eigen Threads::Threads)
 target_compile_options(nx_control_core PRIVATE -Wall -Wextra -Wpedantic)
+
+include(CheckIPOSupported)
+check_ipo_supported(RESULT NX_CONTROL_IPO_SUPPORTED OUTPUT NX_CONTROL_IPO_ERROR)
+if(NX_CONTROL_IPO_SUPPORTED)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET nx_control_core PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+endif()
 
 if(NX_CONTROL_USE_OSQP)
     find_path(OSQP_INCLUDE_DIR osqp.h

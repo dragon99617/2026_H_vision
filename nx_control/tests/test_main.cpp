@@ -1,4 +1,5 @@
 #include "nx_control/controller.hpp"
+#include "nx_control/friction_compensator.hpp"
 #include "nx_control/io.hpp"
 #include "nx_control/mpc.hpp"
 #include "nx_control/observer.hpp"
@@ -8,6 +9,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -373,10 +375,12 @@ void test_mpc_constraints() {
                  2.0 * 3.14159265358979323846 / 180.0) < 1e-12,
         "NX default angle rate limit is 2 degrees per second");
   check(std::abs(config.position_scale_m - 0.010) < 1e-12 &&
-            std::abs(config.velocity_scale_m_s - 0.015) < 1e-12 &&
+            std::abs(config.velocity_scale_m_s - 0.010) < 1e-12 &&
             std::abs(config.input_scale_m_s2 - 0.100) < 1e-12 &&
             std::abs(config.delta_input_scale_m_s2 - 0.015) < 1e-12,
-        "MPC scales penalize velocity, angle, and angle changes more strongly");
+        "MPC defaults apply the stronger Task 3 velocity penalty");
+  check(config.horizon == 40,
+        "MPC default horizon previews 0.8 seconds at 20 ms");
   check(std::abs(config.hold_enter_position_error_m - 0.004) < 1e-12 &&
             std::abs(config.hold_enter_velocity_m_s - 0.015) < 1e-12 &&
             std::abs(config.hold_exit_position_error_m - 0.008) < 1e-12,
@@ -414,6 +418,22 @@ void test_mpc_constraints() {
       previous = command;
     }
   }
+  const Eigen::MatrixXd cached_hessian = problem.hessian;
+  const Eigen::MatrixXd cached_constraint = problem.constraint;
+  const Eigen::VectorXd first_gradient = problem.gradient;
+  reference[0].position_m = 0.002;
+  mpc.solve({0.02, 0.01, 0.03, 0.04}, result.command_m_s2, reference,
+            acceleration);
+  check((mpc.last_problem().hessian - cached_hessian)
+                    .cwiseAbs()
+                    .maxCoeff() < 1e-12 &&
+            (mpc.last_problem().constraint - cached_constraint)
+                    .cwiseAbs()
+                    .maxCoeff() < 1e-12 &&
+            (mpc.last_problem().gradient - first_gradient)
+                    .cwiseAbs()
+                    .maxCoeff() > 1e-6,
+        "MPC caches invariant Hessian/constraints while rebuilding state-dependent terms");
 }
 
 void test_mpc_actuator_delay() {
@@ -433,23 +453,108 @@ void test_mpc_actuator_delay() {
 }
 
 void test_task_manager() {
-  nx_control::TaskManager task;
+  nx_control::ControlConfig config;
+  nx_control::TaskManager task(config);
   task.configure(nx_control::TaskMode::Contest3, 0.0, true);
   check(std::abs(task.target_m() - 0.05) < 1e-12,
         "contest task 3 starts toward +5 cm");
-  nx_control::ObserverState state{0.05, 0.0, 0.0};
-  task.update(1.0, state, nullptr);
-  task.update(1.21, state, nullptr);
-  check(std::abs(task.target_m() + 0.05) < 1e-12,
-        "contest task 3 switches +5 to -5 cm");
+  nx_control::TubeStatus tube;
+  tube.theta_actual_rad = config.task3_theta_bias_rad;
+  nx_control::ObserverState state;
+
+  nx_control::ReferencePoint previous =
+      task.update(1.0, state, nullptr, &tube, true);
+  check(std::abs(previous.position_m) < 1e-12 &&
+            std::abs(previous.velocity_m_s) < 1e-12 &&
+            std::abs(previous.acceleration_m_s2) < 1e-12,
+        "contest task 3 reference starts continuously at the center");
+  bool reference_limits_ok = true;
+  bool reference_continuity_ok = true;
+  std::vector<nx_control::ReferencePoint> moving_preview;
+  constexpr double sample_dt_s = 0.01;
+  for (int sample = 1; sample <= 400; ++sample) {
+    const nx_control::ReferencePoint point =
+        task.update(1.0 + sample * sample_dt_s, state, nullptr, &tube, true);
+    reference_limits_ok =
+        reference_limits_ok &&
+        std::abs(point.velocity_m_s) <=
+            config.task3_reference_max_velocity_m_s + 1e-9 &&
+        std::abs(point.acceleration_m_s2) <=
+            config.task3_reference_max_acceleration_m_s2 + 1e-9 &&
+        std::abs(point.acceleration_m_s2 - previous.acceleration_m_s2) <=
+            config.task3_reference_max_jerk_m_s3 * sample_dt_s + 2e-5;
+    reference_continuity_ok =
+        reference_continuity_ok &&
+        std::abs(point.position_m - previous.position_m) <=
+            config.task3_reference_max_velocity_m_s * sample_dt_s + 1e-6 &&
+        std::abs(point.velocity_m_s - previous.velocity_m_s) <=
+            config.task3_reference_max_acceleration_m_s2 * sample_dt_s + 1e-6;
+    if (sample == 100) moving_preview = task.reference_horizon(3);
+    previous = point;
+  }
+  check(reference_limits_ok,
+        "Task 3 quintic reference respects velocity, acceleration, and jerk limits");
+  check(reference_continuity_ok,
+        "Task 3 reference position, velocity, and acceleration remain continuous");
+  check(moving_preview.size() == 3U &&
+            moving_preview[0].position_m < moving_preview[1].position_m &&
+            moving_preview[1].position_m < moving_preview[2].position_m &&
+            moving_preview[0].velocity_m_s > 0.0,
+        "Task 3 horizon samples future trajectory points instead of copying one target");
+
+  state = nx_control::ObserverState{0.0459, 0.0, 0.0};
+  task.update(5.10, state, nullptr, &tube, true);
+  task.update(5.70, state, nullptr, &tube, true);
+  check(task.task3_stage() == 0 && !task.settle_position_ok(),
+        "Task 3 does not switch outside the 4 mm position band");
+
+  state = nx_control::ObserverState{0.05, 0.0051, 0.0};
+  task.update(6.00, state, nullptr, &tube, true);
+  task.update(6.60, state, nullptr, &tube, true);
+  check(task.task3_stage() == 0 && !task.settle_velocity_ok(),
+        "Task 3 does not switch above 5 mm/s");
+
+  state.velocity_m_s = 0.0;
+  tube.theta_actual_rad =
+      config.task3_theta_bias_rad +
+      config.task3_settle_theta_tolerance_rad + 1e-4;
+  task.update(6.90, state, nullptr, &tube, true);
+  task.update(7.50, state, nullptr, &tube, true);
+  check(task.task3_stage() == 0 && !task.settle_theta_ok(),
+        "Task 3 does not switch before actual tube angle returns to bias");
+
+  tube.theta_actual_rad = config.task3_theta_bias_rad;
+  task.update(7.80, state, nullptr, &tube, false);
+  task.update(8.40, state, nullptr, &tube, false);
+  check(task.task3_stage() == 0 && task.settle_theta_ok() == false,
+        "Task 3 cannot advance while DMMC/vision feedback is stale");
+
+  task.update(8.70, state, nullptr, &tube, true);
+  task.update(9.19, state, nullptr, &tube, true);
+  check(task.task3_stage() == 0,
+        "Task 3 requires the complete 500 ms settle dwell");
+  const nx_control::ReferencePoint switch_reference =
+      task.update(9.21, state, nullptr, &tube, true);
+  check(task.task3_stage() == 1 &&
+            std::abs(task.target_m() + 0.05) < 1e-12 &&
+            std::abs(switch_reference.position_m - 0.05) < 1e-12 &&
+            std::abs(switch_reference.velocity_m_s) < 1e-12 &&
+            std::abs(switch_reference.acceleration_m_s2) < 1e-12,
+        "Task 3 starts the return segment only after strict settling without a reference step");
+  const auto return_preview = task.reference_horizon(1);
+  check(!return_preview.empty() &&
+            std::abs(return_preview.front().position_m - 0.05) < 1e-5 &&
+            return_preview.front().velocity_m_s < 0.0,
+        "Task 3 return preview begins smoothly and brakes to its endpoint");
+
   state.position_m = -0.05;
-  task.update(1.22, state, nullptr);
-  task.update(1.43, state, nullptr);
+  task.update(15.50, state, nullptr, &tube, true);
+  task.update(16.01, state, nullptr, &tube, true);
   check(task.static_sequence_complete() &&
             task.state() == nx_control::TaskState::HoldTarget &&
             std::abs(task.target_m() + 0.05) < 1e-12 &&
             task.target_hold_deadband_active(),
-        "contest task 3 holds -5 cm after the second 0.2 second stable period");
+        "contest task 3 holds -5 cm after the second strict stable period");
 
   state.position_m = -0.044;
   state.velocity_m_s = 0.050;
@@ -512,6 +617,71 @@ void test_task_manager() {
   check(task.state() == nx_control::TaskState::StaticMove &&
             !task.static_sequence_complete(),
         "repeated keyboard start restarts the task");
+}
+
+void test_task3_friction_compensator() {
+  constexpr double kDegrees =
+      3.14159265358979323846 / 180.0;
+  nx_control::ControlConfig config;
+  config.task3_friction_blend_time_s = 0.04;
+  nx_control::Task3FrictionCompensator friction(config);
+
+  nx_control::FrictionCompensation result;
+  for (int step = 0; step < 30; ++step) {
+    result = friction.update(step * config.period_s, true, 0.05, 0.0,
+                             0.010, 0.010);
+  }
+  const double positive_command =
+      config.task3_theta_bias_rad + std::atan2(0.010, nx_control::kGravity) +
+      result.theta_friction_rad;
+  check(result.mode == nx_control::FrictionMode::BreakawayPositive &&
+            result.direction == 1 && positive_command > 0.4 * kDegrees,
+        "positive stationary breakaway exceeds the measured +0.4 degree threshold");
+  const double static_compensation = result.theta_friction_rad;
+
+  for (int step = 30; step < 60; ++step) {
+    result = friction.update(step * config.period_s, true, 0.04, 0.011,
+                             0.010, 0.010);
+  }
+  check(result.mode == nx_control::FrictionMode::RollingPositive &&
+            result.theta_friction_rad < static_compensation &&
+            std::abs(result.theta_friction_rad -
+                     config.task3_rolling_compensation_rad) < 2e-5,
+        "friction compensation drops from static to rolling after 10 mm/s");
+
+  result = friction.update(1.30, true, 0.04, -0.020, 0.020, -0.010);
+  check(result.mode == nx_control::FrictionMode::RollingPositive &&
+            result.direction == 1,
+        "friction direction follows positive MPC braking acceleration");
+
+  for (int step = 0; step < 40; ++step) {
+    result = friction.update(1.32 + step * config.period_s, true, 0.001,
+                             0.004, 0.0, 0.0);
+  }
+  check(result.mode == nx_control::FrictionMode::Hold &&
+            result.direction == 0 &&
+            std::abs(result.theta_friction_rad) < 2e-5 &&
+            std::abs(config.task3_theta_bias_rad + result.theta_friction_rad +
+                     0.15 * kDegrees) < 2e-5,
+        "near-target deadband smoothly withdraws directional friction to the bias");
+
+  friction.reset();
+  for (int step = 0; step < 30; ++step) {
+    result = friction.update(3.0 + step * config.period_s, true, -0.05,
+                             0.0, -0.010, -0.010);
+  }
+  const double negative_command =
+      config.task3_theta_bias_rad + std::atan2(-0.010, nx_control::kGravity) +
+      result.theta_friction_rad;
+  check(result.mode == nx_control::FrictionMode::BreakawayNegative &&
+            result.direction == -1 && negative_command < -0.7 * kDegrees,
+        "negative stationary breakaway crosses the measured -0.7 degree threshold");
+
+  result = friction.update(4.0, false, -0.05, 0.0, -0.010, -0.010);
+  check(result.mode == nx_control::FrictionMode::Hold &&
+            result.direction == 0 &&
+            std::abs(result.theta_friction_rad) < 1e-12,
+        "inactive and safety paths apply no friction compensation");
 }
 
 void test_controller_safety() {
@@ -895,6 +1065,185 @@ void test_contest3_waiting_holds_beam() {
         "contest task 3 leaves HOLD when the start key is pressed");
 }
 
+void test_controller_task3_friction_and_protocol() {
+  constexpr double kDegrees =
+      3.14159265358979323846 / 180.0;
+  nx_control::ControlConfig config;
+  config.solver_deadline_ms = 1000.0;
+  config.task3_friction_blend_time_s = 0.04;
+  nx_control::NxController controller(config, std::make_unique<ZeroSolver>());
+  controller.reset(100.0);
+  controller.configure_task(nx_control::TaskMode::Contest3, 0.0, true);
+
+  nx_control::ControlOutput output;
+  double feedback_theta_rad = 0.0;
+  double previous_theta_rad = 0.0;
+  bool rate_limit_ok = true;
+  for (std::uint32_t sequence = 1; sequence <= 40; ++sequence) {
+    const double now_s = 100.0 + sequence * config.period_s;
+    const auto now_ms =
+        static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
+    nx_control::TubeStatus tube;
+    tube.sequence = sequence;
+    tube.dmmc_time_ms = now_ms;
+    tube.theta_actual_rad = feedback_theta_rad;
+    tube.receive_time_s = now_s;
+    controller.ingest_tube_status(tube);
+
+    nx_control::VisionMeasurement vision;
+    vision.frame_id = sequence;
+    vision.status = nx_control::VisionStatus::Measured;
+    vision.position_m = 0.0;
+    vision.ball_confidence = vision.tube_confidence = 1.0;
+    vision.capture_time_ms = now_ms;
+    vision.has_capture_time = true;
+    vision.receive_time_s = now_s;
+    controller.ingest_vision(vision);
+
+    output = controller.tick(now_s, 1000U + sequence);
+    rate_limit_ok =
+        rate_limit_ok &&
+        std::abs(output.command.theta_cmd_rad - previous_theta_rad) <=
+            config.theta_rate_limit_rad_s * config.period_s + 1e-12 &&
+        std::abs(output.command.theta_cmd_rad) <= config.theta_limit_rad + 1e-12;
+    previous_theta_rad = output.command.theta_cmd_rad;
+    feedback_theta_rad = output.command.theta_cmd_rad;
+  }
+  check(rate_limit_ok,
+        "Task 3 total bias/friction/MPC angle respects 4 degree and 2 degree/s limits");
+  check(output.friction_mode ==
+                nx_control::FrictionMode::BreakawayPositive &&
+            output.friction_direction == 1 &&
+            output.command.theta_cmd_rad > 0.4 * kDegrees &&
+            std::abs(output.theta_bias_rad + 0.15 * kDegrees) < 1e-12,
+        "NX Task 3 command applies measured bias and positive breakaway compensation");
+  check(output.command.command_id == 1040U &&
+            output.command.source_frame_id == 40U &&
+            output.command.ttl_ms == 60U &&
+            output.command.flags == 0x01U &&
+            output.command.control_state == nx_control::TaskState::StaticMove,
+        "Task 3 compensation preserves command IDs, frame IDs, TTL, flags, and state semantics");
+
+  nx_control::TubeStatus tube;
+  tube.sequence = 41U;
+  tube.dmmc_time_ms = 100920U;
+  tube.theta_actual_rad = feedback_theta_rad;
+  tube.receive_time_s = 100.92;
+  controller.ingest_tube_status(tube);
+  output = controller.tick(100.92, 1041U);
+  check(!output.safety_latched &&
+            output.command.control_state ==
+                nx_control::TaskState::StandbyHold &&
+            std::abs(output.command.theta_cmd_rad) < 1e-12 &&
+            std::abs(output.theta_bias_rad) < 1e-12 &&
+            std::abs(output.theta_friction_rad) < 1e-12,
+        "Task 3 vision soft HOLD applies no bias or friction compensation");
+
+  nx_control::VisionMeasurement fresh_vision;
+  fresh_vision.frame_id = 41U;
+  fresh_vision.status = nx_control::VisionStatus::Measured;
+  fresh_vision.position_m = 0.0;
+  fresh_vision.ball_confidence = fresh_vision.tube_confidence = 1.0;
+  fresh_vision.capture_time_ms = 100940U;
+  fresh_vision.has_capture_time = true;
+  fresh_vision.receive_time_s = 100.94;
+  controller.ingest_vision(fresh_vision);
+  tube.sequence = 42U;
+  tube.dmmc_time_ms = 100940U;
+  tube.receive_time_s = 100.94;
+  controller.ingest_tube_status(tube);
+  output = controller.tick(100.94, 1042U);
+  check(!output.safety_latched &&
+            output.command.control_state == nx_control::TaskState::StaticMove,
+        "Task 3 resumes normally after soft vision HOLD");
+
+  tube.sequence = 43U;
+  tube.dmmc_time_ms = 101200U;
+  tube.receive_time_s = 101.20;
+  controller.ingest_tube_status(tube);
+  output = controller.tick(101.20, 1043U);
+  check(output.safety_latched &&
+            output.command.control_state == nx_control::TaskState::Safe &&
+            std::abs(output.command.theta_cmd_rad) < 1e-12 &&
+            std::abs(output.theta_bias_rad) < 1e-12 &&
+            std::abs(output.theta_friction_rad) < 1e-12,
+        "Task 3 vision-stale SAFE path applies no bias or friction compensation");
+
+  controller.start_task(101.22);
+  tube.sequence = 44U;
+  tube.dmmc_time_ms = 101220U;
+  tube.receive_time_s = 101.22;
+  controller.ingest_tube_status(tube);
+  fresh_vision.frame_id = 42U;
+  fresh_vision.capture_time_ms = 101220U;
+  fresh_vision.receive_time_s = 101.22;
+  controller.ingest_vision(fresh_vision);
+  output = controller.tick(101.22, 1044U);
+  check(!output.safety_latched,
+        "operator restart clears Task 3 SAFE before stale-DMMC test");
+
+  fresh_vision.frame_id = 43U;
+  fresh_vision.capture_time_ms = 101280U;
+  fresh_vision.receive_time_s = 101.28;
+  controller.ingest_vision(fresh_vision);
+  output = controller.tick(101.28, 1045U);
+  check(output.safety_latched && output.request_stop &&
+            output.command.control_state == nx_control::TaskState::Fault &&
+            std::abs(output.command.theta_cmd_rad) < 1e-12 &&
+            std::abs(output.theta_bias_rad) < 1e-12 &&
+            std::abs(output.theta_friction_rad) < 1e-12 &&
+            output.friction_mode == nx_control::FrictionMode::Hold &&
+            output.friction_direction == 0,
+        "DMMC stale safety path bypasses all Task 3 bias and friction compensation");
+}
+
+void test_csv_task3_diagnostics() {
+  char path[] = "/tmp/nx-control-csv-XXXXXX";
+  const int temporary_fd = ::mkstemp(path);
+  check(temporary_fd >= 0, "create temporary Task 3 CSV");
+  if (temporary_fd < 0) return;
+  ::close(temporary_fd);
+
+  {
+    nx_control::CsvLogger logger;
+    check(logger.open(path), "open temporary Task 3 CSV");
+    nx_control::ControlOutput output;
+    output.task3_stage = 1;
+    output.reference = nx_control::ReferencePoint{-0.01, -0.02, 0.03};
+    output.settle_position_ok = true;
+    output.settle_velocity_ok = false;
+    output.settle_theta_ok = true;
+    output.settle_elapsed_ms = 250.0;
+    output.friction_mode = nx_control::FrictionMode::RollingNegative;
+    output.friction_direction = -1;
+    nx_control::TubeStatus tube;
+    tube.theta_actual_rad = -0.01;
+    logger.write(1.0, output, &tube, nullptr);
+  }
+
+  std::ifstream stream(path);
+  std::string header;
+  std::string row;
+  std::getline(stream, header);
+  std::getline(stream, row);
+  const std::array<const char*, 15> required_fields{
+      "task3_stage",       "planned_x_m",       "planned_v_m_s",
+      "planned_a_m_s2",    "settle_position_ok", "settle_velocity_ok",
+      "settle_theta_ok",    "settle_elapsed_ms", "theta_mpc_deg",
+      "theta_bias_deg",     "theta_friction_deg", "theta_command_deg",
+      "friction_mode",      "friction_direction", "theta_actual_deg"};
+  bool fields_present = true;
+  for (const char* field : required_fields) {
+    fields_present = fields_present &&
+                     header.find(field) != std::string::npos;
+  }
+  check(fields_present,
+        "control CSV contains every required Task 3 planning, settle, and friction field");
+  check(row.find("ROLLING_NEGATIVE,-1") != std::string::npos,
+        "control CSV writes human-readable friction mode and direction");
+  ::unlink(path);
+}
+
 }  // namespace
 
 int main() {
@@ -905,11 +1254,14 @@ int main() {
   test_mpc_constraints();
   test_mpc_actuator_delay();
   test_task_manager();
+  test_task3_friction_compensator();
   test_controller_safety();
   test_controller_angle_limit();
   test_controller_hold_deadband();
   test_contest3_chassis_gate();
   test_contest3_waiting_holds_beam();
+  test_controller_task3_friction_and_protocol();
+  test_csv_task3_diagnostics();
   if (failures != 0) {
     std::cerr << failures << " test(s) failed\n";
     return 1;

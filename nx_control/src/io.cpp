@@ -1,4 +1,5 @@
 #include "nx_control/io.hpp"
+#include "nx_control/friction_compensator.hpp"
 #include "nx_control/protocol.hpp"
 
 #include <arpa/inet.h>
@@ -28,6 +29,8 @@ namespace {
 
 constexpr std::uint64_t kSequenceReservationSize = 4096U;
 constexpr std::size_t kSequenceStateRecordSize = 21U;
+constexpr double kRadiansToDegrees =
+    180.0 / 3.14159265358979323846;
 
 speed_t baud_flag(int baud) {
   switch (baud) {
@@ -197,6 +200,35 @@ ControlConfig load_config(const std::string& path) {
   number("hold_enter_position_error_m", config.hold_enter_position_error_m);
   number("hold_enter_velocity_m_s", config.hold_enter_velocity_m_s);
   number("hold_exit_position_error_m", config.hold_exit_position_error_m);
+  number("task3_reference_max_velocity_m_s",
+         config.task3_reference_max_velocity_m_s);
+  number("task3_reference_max_acceleration_m_s2",
+         config.task3_reference_max_acceleration_m_s2);
+  number("task3_reference_max_jerk_m_s3",
+         config.task3_reference_max_jerk_m_s3);
+  number("task3_settle_position_error_m",
+         config.task3_settle_position_error_m);
+  number("task3_settle_velocity_m_s", config.task3_settle_velocity_m_s);
+  number("task3_settle_dwell_s", config.task3_settle_dwell_s);
+  number("task3_settle_theta_tolerance_rad",
+         config.task3_settle_theta_tolerance_rad);
+  number("task3_theta_bias_rad", config.task3_theta_bias_rad);
+  number("task3_theta_static_rad", config.task3_theta_static_rad);
+  number("task3_theta_margin_rad", config.task3_theta_margin_rad);
+  number("task3_rolling_compensation_rad",
+         config.task3_rolling_compensation_rad);
+  number("task3_friction_blend_time_s",
+         config.task3_friction_blend_time_s);
+  number("task3_friction_rolling_enter_velocity_m_s",
+         config.task3_friction_rolling_enter_velocity_m_s);
+  number("task3_friction_stationary_enter_velocity_m_s",
+         config.task3_friction_stationary_enter_velocity_m_s);
+  number("task3_friction_disable_position_error_m",
+         config.task3_friction_disable_position_error_m);
+  number("task3_friction_disable_velocity_m_s",
+         config.task3_friction_disable_velocity_m_s);
+  number("task3_friction_request_acceleration_m_s2",
+         config.task3_friction_request_acceleration_m_s2);
   number("slack_weight", config.slack_weight);
   number("measurement_sigma_m", config.measurement_sigma_m);
   number("predicted_min_confidence", config.predicted_min_confidence);
@@ -229,6 +261,11 @@ ControlConfig load_config(const std::string& path) {
   integer("qp_max_iterations", config.qp_max_iterations);
   number("qp_eps_abs", config.qp_eps_abs);
   number("qp_eps_rel", config.qp_eps_rel);
+  number("qp_rho", config.qp_rho);
+  integer("qp_adaptive_rho_interval", config.qp_adaptive_rho_interval);
+  integer("qp_check_termination_interval",
+          config.qp_check_termination_interval);
+  boolean("qp_scaled_termination", config.qp_scaled_termination);
   if (!(config.period_s > 0.0 && config.actuator_tau_s > 0.0 && config.horizon > 0 &&
         config.predicted_min_confidence >= 0.0 && config.predicted_min_confidence <= 1.0 &&
         config.vision_frame_rate_hz > 0.0 &&
@@ -236,7 +273,28 @@ ControlConfig load_config(const std::string& path) {
         config.vision_decay_start_s < config.vision_loss_hold_s &&
         config.vision_loss_hold_s < config.vision_loss_safe_s &&
         config.position_soft_limit_m > 0.0 &&
-        config.position_safe_limit_m > config.position_soft_limit_m)) {
+        config.position_safe_limit_m > config.position_soft_limit_m &&
+        config.task3_reference_max_velocity_m_s > 0.0 &&
+        config.task3_reference_max_acceleration_m_s2 > 0.0 &&
+        config.task3_reference_max_jerk_m_s3 > 0.0 &&
+        config.task3_settle_position_error_m > 0.0 &&
+        config.task3_settle_velocity_m_s > 0.0 &&
+        config.task3_settle_dwell_s >= 0.0 &&
+        config.task3_settle_theta_tolerance_rad > 0.0 &&
+        config.task3_theta_static_rad >= 0.0 &&
+        config.task3_theta_margin_rad >= 0.0 &&
+        config.task3_rolling_compensation_rad >= 0.0 &&
+        config.task3_friction_blend_time_s > 0.0 &&
+        config.task3_friction_stationary_enter_velocity_m_s >= 0.0 &&
+        config.task3_friction_rolling_enter_velocity_m_s >
+            config.task3_friction_stationary_enter_velocity_m_s &&
+        config.task3_friction_disable_position_error_m > 0.0 &&
+        config.task3_friction_disable_velocity_m_s > 0.0 &&
+        config.task3_friction_request_acceleration_m_s2 >= 0.0 &&
+        config.qp_eps_abs > 0.0 && config.qp_eps_rel > 0.0 &&
+        config.qp_rho > 0.0 &&
+        config.qp_adaptive_rho_interval >= 0 &&
+        config.qp_check_termination_interval > 0)) {
     throw std::runtime_error("invalid control config limits");
   }
   return config;
@@ -356,11 +414,16 @@ bool CsvLogger::open(const std::string& path) {
   last_wire_control_state_ = 0;
   stream_ << "time_s,command_id,source_frame_id,state,wire_control_state,wire_flags,"
              "dmmc_controller_state,safety_latched,safety_event_id,last_stop_reason,"
+             "task3_stage,planned_x_m,planned_v_m_s,planned_a_m_s2,"
+             "settle_position_ok,settle_velocity_ok,settle_theta_ok,settle_elapsed_ms,"
+             "theta_mpc_deg,theta_bias_deg,theta_friction_deg,theta_command_deg,"
+             "friction_mode,friction_direction,theta_actual_deg,"
              "x_m,v_m_s,d_m_s2,x_ref_m,u_cmd_m_s2,"
              "theta_cmd_rad,theta_actual_rad,motor_position_rad,motor_velocity_rad_s,"
              "motor_torque_nm,a_actual_m_s2,a_ref_m_s2,v_actual_m_s,v_ref_m_s,jerk_ref_m_s3,"
              "track_error_m,track_quality,chassis_events,vision_age_ms,"
-             "chassis_age_ms,dmmc_age_ms,mpc_ms,solver_iterations,slack_m,solver_failures,"
+             "chassis_age_ms,dmmc_age_ms,mpc_ms,qp_build_ms,qp_setup_ms,qp_update_ms,"
+             "qp_backend_solve_ms,qp_iteration_us,solver_iterations,slack_m,solver_failures,"
              "fallback,slow,stop,tube_faults,motion_phase,track_segment,reason,prediction_m\n";
   return true;
 }
@@ -378,6 +441,21 @@ void CsvLogger::write(double now_s, const ControlOutput& output, const TubeStatu
           << ',' << (output.safety_latched ? 1 : 0)
           << ',' << output.safety_event_id
           << ',' << output.last_stop_reason
+          << ',' << output.task3_stage
+          << ',' << output.reference.position_m
+          << ',' << output.reference.velocity_m_s
+          << ',' << output.reference.acceleration_m_s2
+          << ',' << (output.settle_position_ok ? 1 : 0)
+          << ',' << (output.settle_velocity_ok ? 1 : 0)
+          << ',' << (output.settle_theta_ok ? 1 : 0)
+          << ',' << output.settle_elapsed_ms
+          << ',' << output.theta_mpc_rad * kRadiansToDegrees
+          << ',' << output.theta_bias_rad * kRadiansToDegrees
+          << ',' << output.theta_friction_rad * kRadiansToDegrees
+          << ',' << output.command.theta_cmd_rad * kRadiansToDegrees
+          << ',' << friction_mode_name(output.friction_mode)
+          << ',' << output.friction_direction
+          << ',' << (tube ? tube->theta_actual_rad * kRadiansToDegrees : 0.0)
           << ',' << output.estimate.position_m << ',' << output.estimate.velocity_m_s << ','
           << output.estimate.disturbance_m_s2 << ',' << output.reference.position_m << ','
           << output.u_command_m_s2 << ',' << output.command.theta_cmd_rad << ','
@@ -393,7 +471,10 @@ void CsvLogger::write(double now_s, const ControlOutput& output, const TubeStatu
           << (chassis ? chassis->track_quality : 0.0) << ','
           << (chassis ? chassis->events : 0) << ',' << output.vision_age_ms
           << ',' << output.chassis_age_ms << ',' << output.dmmc_age_ms << ','
-          << output.mpc_solve_ms << ',' << output.solver_iterations << ','
+          << output.mpc_solve_ms << ',' << output.qp_build_ms << ','
+          << output.qp_setup_ms << ','
+          << output.qp_update_ms << ',' << output.qp_backend_solve_ms << ','
+          << output.qp_iteration_us << ',' << output.solver_iterations << ','
           << output.max_predicted_slack_m << ','
           << output.solver_failures << ',' << (output.used_fallback ? 1 : 0) << ','
           << (output.request_slowdown ? 1 : 0) << ',' << (output.request_stop ? 1 : 0) << ','

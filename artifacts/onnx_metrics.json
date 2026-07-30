@@ -1,50 +1,50 @@
 {
-  "confidence": 0.7799898386001587,
+  "confidence": 0.6,
   "candidates": {
     "768x480": {
       "onnx": "models/ball_yolo26s_768x480_end2end.onnx",
       "metrics": {
-        "threshold": 0.7799898386001587,
-        "tp": 99,
+        "threshold": 0.6,
+        "tp": 15,
         "fp": 0,
-        "fn": 5,
+        "fn": 0,
         "precision": 1.0,
-        "recall": 0.9519230769230769,
-        "f1": 0.9753694581280787,
-        "map50": 0.9992569538446182,
-        "images": 17,
-        "ground_truth_objects": 104,
-        "raw_predictions": 136,
+        "recall": 1.0,
+        "f1": 1.0,
+        "map50": 1.0,
+        "images": 15,
+        "ground_truth_objects": 15,
+        "raw_predictions": 16,
         "input_shape": [
           1,
           3,
           480,
           768
         ],
-        "cpu_inference_mean_ms": 463.816120823514
+        "cpu_inference_mean_ms": 471.37184053329594
       }
     },
     "640x416": {
       "onnx": "models/ball_yolo26s_640x416_end2end.onnx",
       "metrics": {
-        "threshold": 0.7799898386001587,
-        "tp": 101,
+        "threshold": 0.6,
+        "tp": 15,
         "fp": 0,
-        "fn": 3,
+        "fn": 0,
         "precision": 1.0,
-        "recall": 0.9711538461538461,
-        "f1": 0.9853658536585366,
-        "map50": 0.9999057048561999,
-        "images": 17,
-        "ground_truth_objects": 104,
-        "raw_predictions": 121,
+        "recall": 1.0,
+        "f1": 1.0,
+        "map50": 1.0,
+        "images": 15,
+        "ground_truth_objects": 15,
+        "raw_predictions": 17,
         "input_shape": [
           1,
           3,
           416,
           640
         ],
-        "cpu_inference_mean_ms": 360.1664819413118
+        "cpu_inference_mean_ms": 358.3614160660848
       }
     }
   }
