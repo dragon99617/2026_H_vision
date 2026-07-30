@@ -13,6 +13,7 @@ from ball_runtime.tube_geometry import (
     contour_axis_position_cm,
     point_in_tube,
     project_points,
+    segment_tube,
     segment_white_tube,
 )
 from ball_runtime.types import (
@@ -37,15 +38,56 @@ def calibration() -> RgbdCalibration:
     )
 
 
-def synthetic_flat_scene():
+def synthetic_flat_scene(tube_color=(245, 245, 245)):
     image = np.zeros((800, 1280, 3), dtype=np.uint8)
-    cv2.rectangle(image, (430, 330), (850, 470), (245, 245, 245), -1)
+    cv2.rectangle(image, (430, 330), (850, 470), tube_color, -1)
     depth = np.zeros((400, 640), dtype=np.uint16)
     cv2.rectangle(depth, (215, 165), (425, 235), 600, -1)
     return image, depth
 
 
 class TubeGeometryTests(unittest.TestCase):
+    def test_auto_mode_detects_dark_green_tube(self) -> None:
+        image, _ = synthetic_flat_scene((30, 75, 40))
+        contour = segment_tube(image, TubeGeometryConfig())
+        self.assertTrue(contour.valid, contour.reason)
+        self.assertGreaterEqual(contour.projected_length_px, 400.0)
+        self.assertTrue(point_in_tube(contour, (640.0, 400.0)))
+
+    def test_dark_green_mode_keeps_specular_highlight(self) -> None:
+        image, _ = synthetic_flat_scene((25, 65, 35))
+        cv2.rectangle(image, (600, 335), (680, 465), (235, 235, 235), -1)
+        contour = segment_tube(
+            image,
+            TubeGeometryConfig(color_mode="dark-green"),
+        )
+        self.assertTrue(contour.valid, contour.reason)
+        self.assertGreaterEqual(contour.projected_length_px, 400.0)
+
+    def test_dark_green_mode_rejects_white_tube(self) -> None:
+        image, _ = synthetic_flat_scene()
+        contour = segment_tube(
+            image,
+            TubeGeometryConfig(color_mode="dark-green"),
+        )
+        self.assertFalse(contour.valid)
+
+    def test_auto_mode_prefers_green_tube_over_white_distractor(self) -> None:
+        image = np.zeros((800, 1280, 3), dtype=np.uint8)
+        cv2.rectangle(image, (430, 420), (850, 560), (30, 75, 40), -1)
+        cv2.rectangle(image, (300, 120), (980, 220), (245, 245, 245), -1)
+        contour = segment_tube(image, TubeGeometryConfig())
+        self.assertTrue(contour.valid, contour.reason)
+        self.assertGreater(contour.center_px[1], 350.0)
+
+    def test_auto_mode_ignores_undersized_green_distractor(self) -> None:
+        image = np.zeros((800, 1280, 3), dtype=np.uint8)
+        cv2.rectangle(image, (490, 480), (790, 550), (30, 75, 40), -1)
+        cv2.rectangle(image, (430, 160), (850, 300), (245, 245, 245), -1)
+        contour = segment_tube(image, TubeGeometryConfig())
+        self.assertTrue(contour.valid, contour.reason)
+        self.assertLess(contour.center_px[1], 350.0)
+
     def test_segment_and_fit_flat_tube(self) -> None:
         config = TubeGeometryConfig()
         image, depth = synthetic_flat_scene()

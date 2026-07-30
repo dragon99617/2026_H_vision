@@ -9,7 +9,7 @@ from .tube_geometry import (
     TubePoseEstimator,
     closest_axis_position_cm,
     point_in_tube,
-    segment_white_tube,
+    segment_tube,
 )
 from .types import (
     DetectionResult,
@@ -97,7 +97,7 @@ class TubePositionDetector:
                 != self.pose_estimator.last_depth_frame_id
             )
         if self.tube_states is None and is_new_depth:
-            contour = segment_white_tube(packet.image, self.config)
+            contour = segment_tube(packet.image, self.config)
             self.last_contour = contour
             self.pose_updates += 1
             pose = self.pose_estimator.update(
@@ -121,7 +121,7 @@ class TubePositionDetector:
                 )
 
         if contour is None:
-            contour = segment_white_tube(packet.image, self.config)
+            contour = segment_tube(packet.image, self.config)
             self.last_contour = contour
         if detection is not None and not point_in_tube(contour, detection.center):
             self.ball_detector.reset()

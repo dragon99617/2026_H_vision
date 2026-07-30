@@ -1,9 +1,9 @@
-# Gemini 336L 纯 RGB 白管位置
+# Gemini 336L 纯 RGB 墨绿色/白色管道位置
 
 ## 原理与启动
 
 本模式不读取深度、不做人工标定，也不依赖相机安装高度。每帧从暗背景中提取
-完整白管轮廓，拟合二维长轴及左右端点；左端固定为 `-12.50 cm`，右端固定为
+完整管道轮廓，拟合二维长轴及左右端点；左端固定为 `-12.50 cm`，右端固定为
 `+12.50 cm`。YOLO 球心正交投影到该轴，按端点之间的比例线性换算：
 
 ```text
@@ -18,6 +18,17 @@ cd /home/d/2026ti/2026H/ball_yolo26s_nx
 python3 debug_rgb.py
 python3 run_rgb.py
 ```
+
+当前墨绿色管道建议明确使用：
+
+```bash
+python3 debug_rgb.py --tube-color-mode dark-green
+python3 run_rgb.py --tube-color-mode dark-green
+```
+
+默认 `--tube-color-mode auto` 会优先检测墨绿色长轮廓，找不到后再兼容原白管。
+墨绿色分割同时检查 HSV 色相、饱和度、亮度和绿色通道优势，并把与绿色区域
+邻接的白色反光合并，避免高光把轮廓切断。
 
 两个入口都通过 Orbbec SDK 只开启 `1280×800@60` 彩色 MJPEG，深度流保持
 关闭。Debug 中绿色轴为有效的 `RGB CONTOUR SCALE (cm)`，黄色刻度间隔
@@ -56,13 +67,27 @@ python3 debug_rgb.py --color-auto-exposure
 
 ## 门禁、协议与精度
 
-- 白管投影长度默认至少 400 px，背景应较暗且整根管完整可见。
-- 球心必须位于白管轮廓扩张区；轮廓端点使用指数平滑，默认
+- 管道投影长度默认至少 400 px，背景应与管道颜色有明显差异且整根管完整可见。
+- 球心必须位于管道轮廓扩张区；轮廓端点使用指数平滑，默认
   `--rgb-tube-alpha 0.35`。
 - 正方向始终取图像横坐标较大的端点，位置限制在
   `[-12.50,+12.50] cm`。
 - USB 沿用固定18字节 `tube-v2`；`tube_confidence` 在本模式表示二维轮廓
   置信度，而不是深度拟合置信度。
+
+墨绿色默认门限采用 OpenCV HSV 标度：
+
+```text
+--tube-green-hue-min 35
+--tube-green-hue-max 95
+--tube-green-min-saturation 45
+--tube-green-min-value 25
+--tube-green-min-excess 3
+```
+
+若现场画面中的管道过暗，先提高曝光；仍缺失时可把
+`--tube-green-min-value` 降至 `15–20`。若背景绿色物体被误选，应缩窄色相
+范围或提高 `--tube-green-min-excess`，不能直接取消长度和长宽比门禁。
 
 纯 RGB 只能测量图像上的比例。管道前后倾斜会带来透视误差，因此
 `±0.5 cm` 是现场验收目标，不是未经实测的保证。无需标定，但应把球放在

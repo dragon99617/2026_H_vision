@@ -9,7 +9,7 @@ from .latest import LatestValue, RollingRate
 from .tube_geometry import (
     TubeGeometryConfig,
     TubePoseEstimator,
-    segment_white_tube,
+    segment_tube,
 )
 from .types import (
     DetectionResult,
@@ -84,7 +84,7 @@ class TubePoseWorker:
             )
             started = time.monotonic()
             try:
-                contour = segment_white_tube(
+                contour = segment_tube(
                     packet.image, self.config
                 )
                 pose = self.estimator.update(

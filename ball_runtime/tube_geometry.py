@@ -27,8 +27,14 @@ class TubeGeometryConfig:
     max_observed_length_m: float = 0.28
     pose_max_age_ms: float = 100.0
     sign_deadband_px: float = 20.0
+    color_mode: str = "auto"
     white_min_gray: int = 105
     white_max_saturation: int = 150
+    green_hue_min: int = 35
+    green_hue_max: int = 95
+    green_min_saturation: int = 45
+    green_min_value: int = 25
+    green_min_excess: int = 3
     mask_expand_px: int = 18
     longitudinal_bins: int = 40
     depth_stride: int = 4
@@ -44,18 +50,32 @@ class TubeGeometryConfig:
             raise ValueError("longitudinal_bins must be at least 8")
         if self.depth_stride < 1:
             raise ValueError("depth_stride must be positive")
+        if self.color_mode not in ("auto", "white", "dark-green"):
+            raise ValueError("color_mode must be auto, white, or dark-green")
+        if not 0 <= self.white_min_gray <= 255:
+            raise ValueError("white_min_gray must be in 0..255")
+        if not 0 <= self.white_max_saturation <= 255:
+            raise ValueError("white_max_saturation must be in 0..255")
+        if not 0 <= self.green_hue_min <= self.green_hue_max <= 179:
+            raise ValueError("green hue range must be ordered inside 0..179")
+        if not 0 <= self.green_min_saturation <= 255:
+            raise ValueError("green_min_saturation must be in 0..255")
+        if not 0 <= self.green_min_value <= 255:
+            raise ValueError("green_min_value must be in 0..255")
+        if not 0 <= self.green_min_excess <= 255:
+            raise ValueError("green_min_excess must be in 0..255")
 
 
 def _invalid_contour(reason: str) -> TubeContour:
     return TubeContour(valid=False, reason=reason)
 
 
-def segment_white_tube(
+def segment_tube(
     image: np.ndarray,
     config: TubeGeometryConfig,
     excluded_box: Optional[Detection] = None,
 ) -> TubeContour:
-    """Extract one elongated, bright, low-chroma half-pipe on a dark field."""
+    """Extract one elongated white or dark-green half-pipe on a dark field."""
     if image is None or image.ndim != 3 or image.shape[2] != 3:
         return _invalid_contour("invalid color image")
     height, width = image.shape[:2]
@@ -74,16 +94,7 @@ def segment_white_tube(
     working_height, working_width = working.shape[:2]
     gray = cv2.cvtColor(working, cv2.COLOR_BGR2GRAY)
     hsv = cv2.cvtColor(working, cv2.COLOR_BGR2HSV)
-    otsu_threshold, _ = cv2.threshold(
-        gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU
-    )
-    threshold = max(config.white_min_gray, min(220, int(otsu_threshold)))
-    mask = np.where(
-        (gray >= threshold) & (hsv[:, :, 1] <= config.white_max_saturation),
-        255,
-        0,
-    ).astype(np.uint8)
-
+    exclusion = None
     if excluded_box is not None:
         margin = max(2, int(config.mask_expand_px * analysis_scale * 0.5))
         x1 = max(0, int(math.floor(excluded_box.x1 * analysis_scale)) - margin)
@@ -96,46 +107,137 @@ def segment_white_tube(
             working_height,
             int(math.ceil(excluded_box.y2 * analysis_scale)) + margin,
         )
-        mask[y1:y2, x1:x2] = 0
+        exclusion = (x1, y1, x2, y2)
 
     open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
-    contours, _ = cv2.findContours(
-        mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    white_close_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (7, 7)
     )
-    if not contours:
-        return _invalid_contour("no white contour")
-
+    green_close_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (9, 9)
+    )
     minimum_area = max(95.0, working_width * working_height * 0.006)
-    candidates = []
-    for contour in contours:
-        area = float(cv2.contourArea(contour))
-        if area < minimum_area or len(contour) < 5:
-            continue
-        points = contour.reshape(-1, 2).astype(np.float64)
-        centered = points - points.mean(axis=0)
-        covariance = centered.T.dot(centered) / max(1, len(points) - 1)
-        values, vectors = np.linalg.eigh(covariance)
-        axis = vectors[:, int(np.argmax(values))]
-        longitudinal = points.dot(axis)
-        lateral_axis = np.array((-axis[1], axis[0]))
-        lateral = points.dot(lateral_axis)
-        length = float(longitudinal.max() - longitudinal.min())
-        tube_width = float(lateral.max() - lateral.min())
-        elongation = length / max(1.0, tube_width)
-        if (
-            length
-            < config.min_projected_length_px * analysis_scale * 0.65
-            or elongation < 2.2
-        ):
-            continue
-        candidates.append((length * math.sqrt(area) * min(8.0, elongation), contour))
-    if not candidates:
-        return _invalid_contour("no elongated white contour")
 
-    working_contour = max(candidates, key=lambda item: item[0])[1]
+    def exclude_ball(mask: np.ndarray) -> np.ndarray:
+        if exclusion is not None:
+            x1, y1, x2, y2 = exclusion
+            mask[y1:y2, x1:x2] = 0
+        return mask
+
+    def white_pixels(adaptive: bool) -> np.ndarray:
+        threshold = config.white_min_gray
+        if adaptive:
+            otsu_threshold, _ = cv2.threshold(
+                gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU
+            )
+            threshold = max(
+                config.white_min_gray,
+                min(220, int(otsu_threshold)),
+            )
+        bright = cv2.compare(gray, threshold, cv2.CMP_GE)
+        low_saturation = cv2.compare(
+            hsv[:, :, 1],
+            config.white_max_saturation,
+            cv2.CMP_LE,
+        )
+        return cv2.bitwise_and(bright, low_saturation)
+
+    def find_candidates(raw_mask: np.ndarray, close_kernel: np.ndarray):
+        mask = cv2.morphologyEx(raw_mask, cv2.MORPH_OPEN, open_kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        candidates = []
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if area < minimum_area or len(contour) < 5:
+                continue
+            points = contour.reshape(-1, 2).astype(np.float64)
+            centered = points - points.mean(axis=0)
+            covariance = centered.T.dot(centered) / max(1, len(points) - 1)
+            values, vectors = np.linalg.eigh(covariance)
+            axis = vectors[:, int(np.argmax(values))]
+            longitudinal = points.dot(axis)
+            lateral_axis = np.array((-axis[1], axis[0]))
+            lateral = points.dot(lateral_axis)
+            length = float(longitudinal.max() - longitudinal.min())
+            tube_width = float(lateral.max() - lateral.min())
+            elongation = length / max(1.0, tube_width)
+            if (
+                length
+                < config.min_projected_length_px * analysis_scale * 0.65
+                or elongation < 2.2
+            ):
+                continue
+            score = length * math.sqrt(area) * min(8.0, elongation)
+            candidates.append((score, contour, length))
+        return candidates
+
+    working_contour = None
+    selected_color = ""
+    if config.color_mode in ("auto", "dark-green"):
+        green_hsv = cv2.inRange(
+            hsv,
+            (
+                config.green_hue_min,
+                config.green_min_saturation,
+                config.green_min_value,
+            ),
+            (config.green_hue_max, 255, 255),
+        )
+        blue, green_channel, red = cv2.split(working)
+        green_excess = cv2.subtract(
+            green_channel,
+            cv2.max(blue, red),
+        )
+        dominant_green = cv2.compare(
+            green_excess,
+            config.green_min_excess,
+            cv2.CMP_GE,
+        )
+        green_core = cv2.bitwise_and(green_hsv, dominant_green)
+        # Preserve white specular highlights only when they touch green paint.
+        highlight_neighborhood = cv2.dilate(
+            green_core,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)),
+        )
+        green_mask = cv2.bitwise_or(
+            green_core,
+            cv2.bitwise_and(
+                white_pixels(adaptive=False),
+                highlight_neighborhood,
+            ),
+        )
+        candidates = find_candidates(
+            exclude_ball(green_mask),
+            green_close_kernel,
+        )
+        if config.color_mode == "auto":
+            full_length_gate = (
+                config.min_projected_length_px * analysis_scale
+            )
+            candidates = [
+                candidate
+                for candidate in candidates
+                if candidate[2] >= full_length_gate
+            ]
+        if candidates:
+            working_contour = max(candidates, key=lambda item: item[0])[1]
+            selected_color = "dark-green"
+    if working_contour is None and config.color_mode in ("auto", "white"):
+        candidates = find_candidates(
+            exclude_ball(white_pixels(adaptive=True)),
+            white_close_kernel,
+        )
+        if candidates:
+            working_contour = max(candidates, key=lambda item: item[0])[1]
+            selected_color = "white"
+    if working_contour is None:
+        return _invalid_contour(
+            "no elongated %s tube contour" % config.color_mode
+        )
+
     working_hull = cv2.convexHull(working_contour)
     hull = np.rint(
         working_hull.astype(np.float64) / analysis_scale
@@ -163,6 +265,8 @@ def segment_white_tube(
     length_score = min(1.0, length / max(1.0, config.min_projected_length_px))
     elongation_score = min(1.0, length / max(1.0, 4.0 * tube_width))
     confidence = 0.55 * length_score + 0.45 * elongation_score
+    if selected_color == "dark-green":
+        confidence = min(1.0, confidence + 0.03)
     valid = length >= config.min_projected_length_px
     return TubeContour(
         valid=valid,
@@ -177,6 +281,15 @@ def segment_white_tube(
         confidence=float(confidence),
         reason="" if valid else "projected tube length below gate",
     )
+
+
+def segment_white_tube(
+    image: np.ndarray,
+    config: TubeGeometryConfig,
+    excluded_box: Optional[Detection] = None,
+) -> TubeContour:
+    """Backward-compatible alias; color selection follows ``config.color_mode``."""
+    return segment_tube(image, config, excluded_box)
 
 
 def point_in_tube(contour: TubeContour, point: Tuple[float, float]) -> bool:

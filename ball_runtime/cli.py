@@ -189,6 +189,17 @@ def add_common_arguments(
     parser.add_argument("--tube-max-rms-mm", type=float, default=4.0)
     parser.add_argument("--tube-white-min-gray", type=int, default=105)
     parser.add_argument("--tube-white-max-saturation", type=int, default=150)
+    parser.add_argument(
+        "--tube-color-mode",
+        choices=("auto", "dark-green", "white"),
+        default="auto",
+        help="Tube contour color; auto prefers dark green and falls back to white",
+    )
+    parser.add_argument("--tube-green-hue-min", type=int, default=35)
+    parser.add_argument("--tube-green-hue-max", type=int, default=95)
+    parser.add_argument("--tube-green-min-saturation", type=int, default=45)
+    parser.add_argument("--tube-green-min-value", type=int, default=25)
+    parser.add_argument("--tube-green-min-excess", type=int, default=3)
     parser.add_argument("--rgb-tube-alpha", type=unit_value, default=0.35)
 
 
@@ -248,6 +259,12 @@ class Runtime:
                 pose_max_age_ms=self.args.tube_pose_max_age_ms,
                 white_min_gray=self.args.tube_white_min_gray,
                 white_max_saturation=self.args.tube_white_max_saturation,
+                color_mode=self.args.tube_color_mode,
+                green_hue_min=self.args.tube_green_hue_min,
+                green_hue_max=self.args.tube_green_hue_max,
+                green_min_saturation=self.args.tube_green_min_saturation,
+                green_min_value=self.args.tube_green_min_value,
+                green_min_excess=self.args.tube_green_min_excess,
             )
             if self.args.position_mode == "rgb-contour":
                 self.detector = RgbTubePositionDetector(
@@ -800,6 +817,14 @@ def validate_tube_arguments(parser: argparse.ArgumentParser, args) -> None:
         parser.error("--tube-white-min-gray must be in 0..255")
     if not 0 <= args.tube_white_max_saturation <= 255:
         parser.error("--tube-white-max-saturation must be in 0..255")
+    if not 0 <= args.tube_green_hue_min <= args.tube_green_hue_max <= 179:
+        parser.error("--tube-green-hue-min/max must be ordered inside 0..179")
+    if not 0 <= args.tube_green_min_saturation <= 255:
+        parser.error("--tube-green-min-saturation must be in 0..255")
+    if not 0 <= args.tube_green_min_value <= 255:
+        parser.error("--tube-green-min-value must be in 0..255")
+    if not 0 <= args.tube_green_min_excess <= 255:
+        parser.error("--tube-green-min-excess must be in 0..255")
     if args.color_exposure_scale <= 0:
         parser.error("--color-exposure-scale must be positive")
     if (

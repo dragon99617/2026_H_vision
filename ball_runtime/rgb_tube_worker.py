@@ -7,7 +7,7 @@ from typing import Optional
 
 from .latest import LatestValue, RollingRate
 from .rgb_tube_position_detector import smooth_rgb_tube_contour
-from .tube_geometry import TubeGeometryConfig, segment_white_tube
+from .tube_geometry import TubeGeometryConfig, segment_tube
 from .types import FramePacket, RgbTubeState, TubeContour
 
 
@@ -67,7 +67,7 @@ class RgbTubeWorker:
             previous_frame_id = packet.frame_id
             started = time.monotonic()
             try:
-                contour = segment_white_tube(packet.image, self.config)
+                contour = segment_tube(packet.image, self.config)
                 if contour.valid:
                     contour = smooth_rgb_tube_contour(
                         previous_contour,

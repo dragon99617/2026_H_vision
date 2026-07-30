@@ -67,6 +67,21 @@ class RgbTubePositionDetectorTests(unittest.TestCase):
         self.assertIsNone(result.tube_pose)
         self.assertTrue(result.has_valid_position)
 
+    def test_dark_green_tube_center_ball_is_zero(self) -> None:
+        image, _ = synthetic_flat_scene((30, 75, 40))
+        config = TubeGeometryConfig(color_mode="dark-green")
+        contour = segment_white_tube(image, config)
+        negative = contour.endpoint_negative_px
+        positive = contour.endpoint_positive_px
+        x = (negative[0] + positive[0]) * 0.5
+        y = (negative[1] + positive[1]) * 0.5
+        ball = FakeBallDetector(Detection(x - 10, y - 10, x + 10, y + 10, 0.9))
+        result = RgbTubePositionDetector(ball, config).detect(
+            FramePacket(2, 2.0, image)
+        )
+        self.assertEqual(result.status, TrackStatus.MEASURED)
+        self.assertAlmostEqual(result.position_cm, 0.0, places=4)
+
     def test_quarter_axis_maps_to_minus_six_point_two_five(self) -> None:
         ball = FakeBallDetector(self.detection_at_fraction(0.25))
         result = RgbTubePositionDetector(ball, self.config).detect(

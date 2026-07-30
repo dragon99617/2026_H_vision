@@ -9,7 +9,7 @@ from .tube_geometry import (
     TubeGeometryConfig,
     contour_axis_position_cm,
     point_in_tube,
-    segment_white_tube,
+    segment_tube,
 )
 from .types import DetectionResult, FramePacket, TrackStatus, TubeContour
 
@@ -136,7 +136,7 @@ class RgbTubePositionDetector:
                         reason="RGB tube contour expired",
                     )
         else:
-            contour = segment_white_tube(packet.image, self.config)
+            contour = segment_tube(packet.image, self.config)
             if contour.valid:
                 contour = self._smooth_contour(contour)
             else:

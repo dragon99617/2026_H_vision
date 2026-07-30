@@ -1,8 +1,8 @@
-# Gemini 336L 白色半管三维标定与验收
+# Gemini 336L 墨绿色/白色半管三维标定与验收
 
 ## 坐标定义与运行
 
-白色开放半管的物理长度固定为 25.0 cm。程序拟合的是半管两侧三维边线的
+开放半管的物理长度固定为 25.0 cm。程序拟合的是半管两侧三维边线的
 平均轴线，轴中点为 `0.00 cm`；投影横坐标较大的物理端固定为正端
 `+12.50 cm`，另一端为 `-12.50 cm`。两端横坐标差小于 20 px 时保持上一
 次方向；没有方向历史则输出无效，防止符号翻转。
@@ -43,8 +43,8 @@ SDK 使用 `COLOR_FRAME_REQUIRE` 聚合，因此 60 Hz 彩色不会被 30 Hz 深
 
 厘米输出必须同时满足：
 
-- 当前球心位于白管轮廓扩张区；
-- 白管投影长度至少 400 px；
+- 当前球心位于管道轮廓扩张区；
+- 管道投影长度至少 400 px；
 - 有效深度纵向分箱比例至少 60%；
 - 三维轴线拟合 RMS 不大于 4 mm；
 - 观测管长在 22–28 cm；
@@ -54,13 +54,19 @@ SDK 使用 `COLOR_FRAME_REQUIRE` 聚合，因此 60 Hz 彩色不会被 30 Hz 深
 约 30 Hz；YOLO、厘米投影和 USB 仍按最新彩色帧约 60 Hz。球允许最多两帧
 恒速预测，但过期管姿态绝不继续输出。
 
-Debug 窗口中青色是白管轮廓，紫色是三维轴，标出 `-12.5/0/+12.5`；
+Debug 窗口中青色是管道轮廓，紫色是三维轴，标出 `-12.5/0/+12.5`；
 同时显示球在轴上的投影、厘米位置、RGB/Depth/Pose/Inference FPS、Pitch、
 深度年龄、RMS、有效分箱比例和两个置信度。现场调光时可调：
 
 ```text
 --tube-white-min-gray 105
 --tube-white-max-saturation 150
+--tube-color-mode dark-green
+--tube-green-hue-min 35
+--tube-green-hue-max 95
+--tube-green-min-saturation 45
+--tube-green-min-value 25
+--tube-green-min-excess 3
 --tube-min-projection-px 400
 --tube-min-depth-ratio 0.60
 --tube-max-rms-mm 4
