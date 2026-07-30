@@ -54,6 +54,35 @@ python3 tools/analyze_log.py logs/smoke.csv
 `--dry-run` 不打开串口或UDP，只注入健康零输入，用来检查周期、MPC和日志，不是
 硬件验收。
 
+## 固定 HOLD 通信工具
+
+`tube_hold_sender` 是独立的小工具，以50 Hz向DMMC连续发送固定的
+`tube-control-v3`：
+
+```bash
+./build/tube_hold_sender --dmmc /dev/ttyACM0 --baud 921600 \
+  --state-file state/tube-hold-v3.seq
+```
+
+发送字段固定为角度+20 cdeg（+0.20°）、角速度限制500 cdeg/s（5 deg/s）、TTL 200 ms、
+`control_state=1`（HOLD）、`reserved=0`。首帧默认使用`flags=0x03`
+（ENABLE + 清除可恢复告警），后续使用`0x01`；若不希望首帧清告警，可加
+`--no-clear-faults`。
+
+`command_id`和`source_frame_id`使用相同的严格递增值。工具在序列文件上持有
+独占锁，并在发送前把一段ID预留值同步到磁盘：正常重启连续递增，异常掉电重启
+可能跳号，但不会复用可能已发送的ID。序列文件不得删除、回滚、复制给另一个
+同时运行的发送器；首次接入一个保留了旧命令历史的DMMC时，用
+`--start-command-id LAST_ID_PLUS_ONE`指定安全起点，该参数只对新建或空文件生效。
+工具在串口写入结果不确定时直接退出，不会重发同一个`command_id`。
+
+无硬件检查三帧的完整字节：
+
+```bash
+./build/tube_hold_sender --dry-run --max-frames 3 \
+  --start-command-id 100 --verbose
+```
+
 ## 联机运行
 
 先启动控制进程，再启动视觉进程：
@@ -74,11 +103,42 @@ python3 run.py --no-serial --protocol tube-v3 \
 
 任务参数：
 
+- `--task 3`：赛题要求3，静止时执行 `O→+5→-5 cm`，到达每个端点并稳定
+  200 ms 后切换/完成；
+- `--task 45`：赛题要求4和5，车辆行驶阶段始终保持中心 `O`（`4`和`5`
+  也是该 task 的别名）；
+- `--task 6 --target-cm N`：赛题要求6，车辆行驶阶段保持指定位置 `N` cm；
 - `--task static`：启动后执行 `0→+5→-5 cm`；
 - `--task center`：保持中心；
 - `--task target --target-cm N`：保持指定位置；
 - `--task auto`：指定位置不变，状态随底盘启动/巡航/制动切换；
 - `--wait-start`：等待 `chassis-state-v1.events bit0` 上升沿再开始。
+- `--key-start`：在前台终端等待键盘，按`d`立即开始或从头重启一次任务，无需
+  回车；该模式不响应底盘启动事件。
+
+只有明确的`--task 3`静止任务允许在缺少新鲜`chassis-state-v1`时按底盘加速度
+为0继续运行。其他所有任务（包括旧`--task static`）仍要求底盘状态新鲜且无故障。
+
+赛题 task 示例：
+
+```bash
+# 要求3：小车静止，立即开始
+./build/ball_nx_control --config config/nx-control.conf --task 3
+
+# 要求3：等待按d执行，完成后可再次按d重复执行
+./build/ball_nx_control --config config/nx-control.conf --task 3 --key-start
+
+# 要求4/5：先运行控制器，等待底盘启动按键事件
+./build/ball_nx_control --config config/nx-control.conf --task 45 --wait-start
+
+# 要求6：以 -7.3 cm 为指定位置，等待底盘启动按键事件
+./build/ball_nx_control --config config/nx-control.conf \
+  --task 6 --target-cm -7.3 --wait-start
+```
+
+要求6必须显式给出`--target-cm`，合法范围为`[-10, +10] cm`；要求3和要求4/5
+会忽略该参数。三个赛题 task 只负责摆杆滚球控制，小车循迹、AB/整圈计时和停车
+仍由底盘控制端负责。
 
 示例 systemd 文件在 `deploy/`。其中用户、路径和串口设备是占位值，复制到系统
 前必须按实际 NX 修改。
@@ -112,3 +172,7 @@ python3 tools/analyze_log.py replay-output.csv --json replay-metrics.json
 
 当前代码已通过软件构建和仿真单测；相机、DMMC、底盘实机接口及OSQP在本工作区
 没有可用硬件/库，不能用软件测试结果代替真机验收。
+
+NX的摆杆命令硬限幅为`±0.5°`，角速度限制为`5°/s`，与DMMC02/STM32的
+`hard_angle_limit_deg=0.5°`一致。修改STM32限幅时必须同步修改
+`config/nx-control.conf`中的`theta_limit_rad`，避免DMMC02置位角度越界故障。

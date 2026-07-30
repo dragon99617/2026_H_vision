@@ -37,6 +37,9 @@ enum class TaskMode : std::uint8_t {
   HoldCenter = 2,
   HoldTarget = 3,
   AutoVehicle = 4,
+  Contest3 = 5,   // H problem requirement 3: O -> +5 cm -> -5 cm.
+  Contest45 = 6,  // H problem requirements 4/5: hold O while driving.
+  Contest6 = 7,   // H problem requirement 6: hold a selected point while driving.
 };
 
 struct VisionMeasurement {
@@ -101,6 +104,21 @@ struct ControlCommand {
   std::uint8_t flags = 0;
 };
 
+// Wire-level tube-control-v3 fields.  This is intentionally separate from
+// ControlCommand: the production controller maps its TaskState to an MC02
+// state, while small communication tools sometimes need an exact MC02 state.
+struct TubeControlV3Command {
+  std::uint32_t command_id = 0;
+  std::uint32_t source_frame_id = 0;
+  std::uint32_t nx_time_ms = 0;
+  std::int16_t theta_cmd_cdeg = 0;
+  std::uint16_t theta_rate_limit_cdeg_s = 0;
+  std::uint16_t ttl_ms = 0;
+  std::uint8_t control_state = 0;
+  std::uint8_t flags = 0;
+  std::uint16_t reserved = 0;
+};
+
 struct ObserverState {
   double position_m = 0.0;
   double velocity_m_s = 0.0;
@@ -151,8 +169,8 @@ struct ControlConfig {
   double actuator_delay_s = 0.0;
   double rolling_lambda = kRollingLambda;
   int horizon = 30;
-  double theta_limit_rad = 4.5 * 3.14159265358979323846 / 180.0;
-  double theta_rate_limit_rad_s = 50.0 * 3.14159265358979323846 / 180.0;
+  double theta_limit_rad = 0.5 * 3.14159265358979323846 / 180.0;
+  double theta_rate_limit_rad_s = 5.0 * 3.14159265358979323846 / 180.0;
   double position_soft_limit_m = 0.105;
   double position_safe_limit_m = 0.115;
   double position_scale_m = 0.005;

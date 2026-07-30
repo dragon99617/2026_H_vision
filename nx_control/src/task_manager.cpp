@@ -4,13 +4,25 @@
 
 namespace nx_control {
 
-void TaskManager::configure(TaskMode mode, double target_m, bool start_immediately) {
+bool TaskManager::is_static_sequence() const {
+  return mode_ == TaskMode::StaticSequence || mode_ == TaskMode::Contest3;
+}
+
+bool TaskManager::is_vehicle_task() const {
+  return mode_ == TaskMode::AutoVehicle || mode_ == TaskMode::Contest45 ||
+         mode_ == TaskMode::Contest6;
+}
+
+void TaskManager::configure(TaskMode mode, double target_m, bool start_immediately,
+                            bool start_on_chassis_event) {
   mode_ = mode;
-  requested_target_m_ = target_m;
+  requested_target_m_ =
+      mode == TaskMode::Contest45 || mode == TaskMode::Contest3 ? 0.0 : target_m;
   static_stage_ = 0;
   stable_since_s_ = -1.0;
   previous_events_ = 0;
   armed_ = true;
+  start_on_chassis_event_ = start_on_chassis_event;
   state_ = TaskState::Idle;
   current_reference_ = ReferencePoint{};
   if (start_immediately) start(0.0);
@@ -23,14 +35,17 @@ void TaskManager::start(double now_s) {
   static_stage_ = 0;
   switch (mode_) {
     case TaskMode::StaticSequence:
+    case TaskMode::Contest3:
       state_ = TaskState::StaticMove;
       current_reference_.position_m = 0.05;
       break;
     case TaskMode::HoldCenter:
+    case TaskMode::Contest45:
       state_ = TaskState::HoldCenter;
       current_reference_.position_m = 0.0;
       break;
     case TaskMode::HoldTarget:
+    case TaskMode::Contest6:
       state_ = TaskState::HoldTarget;
       current_reference_.position_m = requested_target_m_;
       break;
@@ -56,11 +71,14 @@ ReferencePoint TaskManager::update(double now_s, const ObserverState& estimate,
   if (chassis != nullptr) {
     const std::uint16_t rising = static_cast<std::uint16_t>(chassis->events & ~previous_events_);
     previous_events_ = chassis->events;
-    if ((rising & 0x0001U) != 0U && state_ == TaskState::Idle) start(now_s);
+    if (start_on_chassis_event_ && (rising & 0x0001U) != 0U &&
+        state_ == TaskState::Idle) {
+      start(now_s);
+    }
   }
   if (state_ != TaskState::Idle && task_started_s_ == 0.0) task_started_s_ = now_s;
 
-  if (mode_ == TaskMode::StaticSequence && state_ == TaskState::StaticMove) {
+  if (is_static_sequence() && state_ == TaskState::StaticMove) {
     const bool within_band = std::abs(estimate.position_m - current_reference_.position_m) <= 0.01 &&
                              std::abs(estimate.velocity_m_s) <= 0.03;
     if (within_band) {
@@ -76,7 +94,7 @@ ReferencePoint TaskManager::update(double now_s, const ObserverState& estimate,
     } else {
       stable_since_s_ = -1.0;
     }
-  } else if (mode_ == TaskMode::AutoVehicle && chassis != nullptr && state_ != TaskState::Idle) {
+  } else if (is_vehicle_task() && chassis != nullptr && state_ != TaskState::Idle) {
     switch (chassis->motion_phase) {
       case MotionPhase::Accel:
         state_ = TaskState::VehicleAccel;

@@ -38,7 +38,11 @@ target_link_libraries(ball_nx_control PRIVATE nx_control_core)
 add_executable(ball_nx_replay src/replay.cpp)
 target_link_libraries(ball_nx_replay PRIVATE nx_control_core)
 
-install(TARGETS ball_nx_control ball_nx_replay RUNTIME DESTINATION bin)
+add_executable(tube_hold_sender src/tube_hold_sender.cpp)
+target_link_libraries(tube_hold_sender PRIVATE nx_control_core)
+target_compile_options(tube_hold_sender PRIVATE -Wall -Wextra -Wpedantic)
+
+install(TARGETS ball_nx_control ball_nx_replay tube_hold_sender RUNTIME DESTINATION bin)
 install(FILES config/nx-control.conf DESTINATION share/ball-nx-control)
 
 if(NX_CONTROL_BUILD_TESTS)
@@ -52,5 +56,10 @@ if(NX_CONTROL_BUILD_TESTS)
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/replay.csv
                 ${CMAKE_CURRENT_BINARY_DIR}/replay-test.csv
                 ${CMAKE_CURRENT_SOURCE_DIR}/config/nx-control.conf
+    )
+    add_test(
+        NAME tube_hold_sender_smoke
+        COMMAND tube_hold_sender --dry-run --max-frames 3
+                --start-command-id 100 --verbose
     )
 endif()

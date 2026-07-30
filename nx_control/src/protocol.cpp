@@ -262,21 +262,33 @@ std::optional<ChassisState> decode_chassis_state(const Frame& frame, double rece
   return value;
 }
 
-std::vector<std::uint8_t> encode_control_command(const ControlCommand& command) {
+std::vector<std::uint8_t> encode_tube_control_v3(const TubeControlV3Command& command) {
   std::vector<std::uint8_t> output{0xA5, 0x5A, kControlV3, 22};
   append_le(output, command.command_id);
   append_le(output, command.source_frame_id);
   append_le(output, command.nx_time_ms);
-  append_le(output, rad_to_cdeg(command.theta_cmd_rad));
-  append_le(output, rad_to_ucdeg(command.theta_rate_limit_rad_s));
+  append_le(output, command.theta_cmd_cdeg);
+  append_le(output, command.theta_rate_limit_cdeg_s);
   append_le(output, command.ttl_ms);
-  output.push_back(mc02_control_state(command.control_state));
+  output.push_back(command.control_state);
   output.push_back(command.flags);
-  output.push_back(0U);
-  output.push_back(0U);
+  append_le(output, command.reserved);
   const std::uint16_t crc = crc16_ccitt_false(output.data(), output.size());
   append_le(output, crc);
   return output;
+}
+
+std::vector<std::uint8_t> encode_control_command(const ControlCommand& command) {
+  TubeControlV3Command wire;
+  wire.command_id = command.command_id;
+  wire.source_frame_id = command.source_frame_id;
+  wire.nx_time_ms = command.nx_time_ms;
+  wire.theta_cmd_cdeg = rad_to_cdeg(command.theta_cmd_rad);
+  wire.theta_rate_limit_cdeg_s = rad_to_ucdeg(command.theta_rate_limit_rad_s);
+  wire.ttl_ms = command.ttl_ms;
+  wire.control_state = mc02_control_state(command.control_state);
+  wire.flags = command.flags;
+  return encode_tube_control_v3(wire);
 }
 
 }  // namespace nx_control::protocol

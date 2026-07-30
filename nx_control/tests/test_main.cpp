@@ -112,17 +112,46 @@ void test_protocol() {
   const auto encoded = nx_control::protocol::encode_control_command(command);
   check(encoded.size() == nx_control::protocol::kControlV3Length, "control-v3 fixed length");
 
+  nx_control::TubeControlV3Command hold_command;
+  hold_command.command_id = 10;
+  hold_command.source_frame_id = 20;
+  hold_command.nx_time_ms = 30;
+  hold_command.theta_cmd_cdeg = 20;
+  hold_command.theta_rate_limit_cdeg_s = 500;
+  hold_command.ttl_ms = 200;
+  hold_command.control_state = 1;
+  hold_command.flags = 0x03U;
+  hold_command.reserved = 0;
+  const auto encoded_hold = nx_control::protocol::encode_tube_control_v3(hold_command);
+  check(encoded_hold.size() == nx_control::protocol::kControlV3Length,
+        "HOLD control-v3 fixed length");
+  check(encoded_hold[4] == 10U && encoded_hold[8] == 20U && encoded_hold[12] == 30U,
+        "HOLD control-v3 identifiers and timestamp");
+  check(encoded_hold[16] == 0x14U && encoded_hold[17] == 0U,
+        "HOLD control-v3 +20 cdeg angle");
+  check(encoded_hold[18] == 0xF4U && encoded_hold[19] == 0x01U,
+        "HOLD control-v3 500 cdeg/s rate limit");
+  check(encoded_hold[20] == 0xC8U && encoded_hold[21] == 0U,
+        "HOLD control-v3 200ms TTL");
+  check(encoded_hold[22] == 1U && encoded_hold[23] == 0x03U &&
+            encoded_hold[24] == 0U && encoded_hold[25] == 0U,
+        "HOLD control-v3 state, first flags, and reserved");
+  check(nx_control::protocol::crc16_ccitt_false(encoded_hold.data(), encoded_hold.size() - 2U) ==
+            (static_cast<std::uint16_t>(encoded_hold[26]) |
+             (static_cast<std::uint16_t>(encoded_hold[27]) << 8U)),
+        "HOLD control-v3 CRC");
+
   nx_control::ControlCommand fault_command;
   fault_command.command_id = 1;
-  fault_command.theta_rate_limit_rad_s = 50.0 * 3.14159265358979323846 / 180.0;
+  fault_command.theta_rate_limit_rad_s = 5.0 * 3.14159265358979323846 / 180.0;
   fault_command.ttl_ms = 60;
   fault_command.control_state = nx_control::TaskState::Fault;
   fault_command.flags = 0x08U;
   const std::vector<std::uint8_t> expected_control{
       0xA5, 0x5A, 0x80, 0x16, 0x01, 0x00, 0x00, 0x00,
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-      0x00, 0x00, 0x88, 0x13, 0x3C, 0x00, 0x04, 0x08,
-      0x00, 0x00, 0x42, 0x41};
+      0x00, 0x00, 0xF4, 0x01, 0x3C, 0x00, 0x04, 0x08,
+      0x00, 0x00, 0x61, 0xB7};
   check(nx_control::protocol::encode_control_command(fault_command) == expected_control,
         "MC02 control golden vector");
 
@@ -291,11 +320,14 @@ void test_remote_clock_sync() {
 
 void test_mpc_constraints() {
   nx_control::ControlConfig config;
+  check(std::abs(config.theta_limit_rad -
+                 0.5 * 3.14159265358979323846 / 180.0) < 1e-12,
+        "NX default angle limit matches STM32 0.5 degree hard limit");
   config.horizon = 12;
   config.solver_deadline_ms = 1000.0;
   config.qp_max_iterations = 1000;
-  config.qp_eps_abs = 1e-3;
-  config.qp_eps_rel = 1e-3;
+  config.qp_eps_abs = 1e-5;
+  config.qp_eps_rel = 1e-5;
   nx_control::BallMpc mpc(config);
   std::vector<nx_control::ReferencePoint> reference(12);
   std::vector<double> acceleration(12, 0.3);
@@ -307,7 +339,9 @@ void test_mpc_constraints() {
                             std::tan(config.theta_rate_limit_rad_s * config.period_s) + 1e-3;
     double previous = 0.0;
     for (double command : result.command_sequence) {
-      check(std::abs(command) <= u_limit, "MPC command angle constraint");
+      check(std::abs(command) <= u_limit,
+            "MPC command angle constraint: command=" + std::to_string(command) +
+                " limit=" + std::to_string(u_limit));
       check(std::abs(command - previous) <= du_limit, "MPC command rate constraint");
       previous = command;
     }
@@ -332,15 +366,60 @@ void test_mpc_actuator_delay() {
 
 void test_task_manager() {
   nx_control::TaskManager task;
-  task.configure(nx_control::TaskMode::StaticSequence, 0.0, true);
+  task.configure(nx_control::TaskMode::Contest3, 0.0, true);
+  check(std::abs(task.target_m() - 0.05) < 1e-12,
+        "contest task 3 starts toward +5 cm");
   nx_control::ObserverState state{0.05, 0.0, 0.0};
   task.update(1.0, state, nullptr);
   task.update(1.21, state, nullptr);
-  check(std::abs(task.target_m() + 0.05) < 1e-12, "static task switches +5 to -5 cm");
+  check(std::abs(task.target_m() + 0.05) < 1e-12,
+        "contest task 3 switches +5 to -5 cm");
   state.position_m = -0.05;
   task.update(1.22, state, nullptr);
   task.update(1.43, state, nullptr);
-  check(task.static_sequence_complete(), "static task completes after stable -5 cm");
+  check(task.static_sequence_complete(), "contest task 3 completes after stable -5 cm");
+
+  nx_control::ChassisState chassis;
+  chassis.events = 0x0001U;
+  chassis.motion_phase = nx_control::MotionPhase::Accel;
+  nx_control::ObserverState centered;
+
+  task.configure(nx_control::TaskMode::Contest45, 0.08, false);
+  check(task.state() == nx_control::TaskState::Idle,
+        "contest task 4/5 can wait for chassis start");
+  task.update(2.0, centered, &chassis);
+  check(task.state() == nx_control::TaskState::VehicleAccel &&
+            std::abs(task.target_m()) < 1e-12,
+        "contest task 4/5 starts on event and always targets center");
+  chassis.motion_phase = nx_control::MotionPhase::Curve;
+  task.update(2.1, centered, &chassis);
+  check(task.state() == nx_control::TaskState::VehicleCruise,
+        "contest task 4/5 follows chassis phase");
+
+  task.configure(nx_control::TaskMode::Contest6, -0.073, true);
+  check(task.state() == nx_control::TaskState::HoldTarget &&
+            std::abs(task.target_m() + 0.073) < 1e-12,
+        "contest task 6 starts at requested target");
+  chassis.events = 0U;
+  chassis.motion_phase = nx_control::MotionPhase::Decel;
+  task.update(3.0, centered, &chassis);
+  check(task.state() == nx_control::TaskState::VehicleDecel &&
+            std::abs(task.target_m() + 0.073) < 1e-12,
+        "contest task 6 preserves target during vehicle motion");
+
+  task.configure(nx_control::TaskMode::Contest3, 0.0, false, false);
+  chassis.events = 0x0001U;
+  task.update(4.0, centered, &chassis);
+  check(task.state() == nx_control::TaskState::Idle,
+        "keyboard task ignores chassis start event");
+  task.start(4.1);
+  check(task.state() == nx_control::TaskState::StaticMove &&
+            std::abs(task.target_m() - 0.05) < 1e-12,
+        "keyboard start begins contest task 3");
+  task.start(4.2);
+  check(task.state() == nx_control::TaskState::StaticMove &&
+            !task.static_sequence_complete(),
+        "repeated keyboard start restarts the task");
 }
 
 void test_controller_safety() {
@@ -372,6 +451,47 @@ void test_controller_safety() {
         "stale vision/chassis requests stop");
 }
 
+void test_contest3_chassis_gate() {
+  nx_control::ControlConfig config;
+  config.solver_deadline_ms = 1000.0;
+
+  auto tick_without_chassis = [&](nx_control::TaskMode mode, double now_s) {
+    nx_control::NxController controller(config, std::make_unique<ZeroSolver>());
+    controller.reset(now_s);
+    controller.configure_task(mode, 0.0, true);
+
+    nx_control::TubeStatus tube;
+    tube.sequence = 1;
+    tube.dmmc_time_ms = static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
+    tube.receive_time_s = now_s;
+    controller.ingest_tube_status(tube);
+
+    nx_control::VisionMeasurement vision;
+    vision.frame_id = 1;
+    vision.status = nx_control::VisionStatus::Measured;
+    vision.ball_confidence = vision.tube_confidence = 1.0;
+    vision.capture_time_ms = static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
+    vision.has_capture_time = true;
+    vision.receive_time_s = now_s;
+    controller.ingest_vision(vision);
+    return controller.tick(now_s + config.period_s);
+  };
+
+  const auto contest3 = tick_without_chassis(nx_control::TaskMode::Contest3, 30.0);
+  check(!contest3.request_stop &&
+            contest3.command.control_state == nx_control::TaskState::StaticMove,
+        "explicit contest task 3 bypasses chassis-fresh gate");
+
+  const auto legacy_static =
+      tick_without_chassis(nx_control::TaskMode::StaticSequence, 40.0);
+  check(legacy_static.request_stop && legacy_static.reason == "chassis_stale",
+        "legacy static mode still requires fresh chassis");
+
+  const auto contest45 = tick_without_chassis(nx_control::TaskMode::Contest45, 50.0);
+  check(contest45.request_stop && contest45.reason == "chassis_stale",
+        "contest task 4/5 still requires fresh chassis");
+}
+
 }  // namespace
 
 int main() {
@@ -382,6 +502,7 @@ int main() {
   test_mpc_actuator_delay();
   test_task_manager();
   test_controller_safety();
+  test_contest3_chassis_gate();
   if (failures != 0) {
     std::cerr << failures << " test(s) failed\n";
     return 1;

@@ -15,7 +15,9 @@ class NxController {
   explicit NxController(const ControlConfig& config,
                         std::unique_ptr<QpSolver> solver = nullptr);
 
-  void configure_task(TaskMode mode, double target_m, bool start_immediately);
+  void configure_task(TaskMode mode, double target_m, bool start_immediately,
+                      bool start_on_chassis_event = true);
+  void start_task(double now_s);
   void ingest_vision(VisionMeasurement measurement);
   void ingest_tube_status(const TubeStatus& status);
   void ingest_chassis_state(const ChassisState& state);

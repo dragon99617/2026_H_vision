@@ -19,9 +19,12 @@ NxController::NxController(const ControlConfig& config, std::unique_ptr<QpSolver
       chassis_sync_(config),
       mpc_(config, std::move(solver)) {}
 
-void NxController::configure_task(TaskMode mode, double target_m, bool start_immediately) {
-  task_manager_.configure(mode, target_m, start_immediately);
+void NxController::configure_task(TaskMode mode, double target_m, bool start_immediately,
+                                  bool start_on_chassis_event) {
+  task_manager_.configure(mode, target_m, start_immediately, start_on_chassis_event);
 }
+
+void NxController::start_task(double now_s) { task_manager_.start(now_s); }
 
 void NxController::reset(double now_s) {
   observer_.reset(now_s);
@@ -178,12 +181,14 @@ ControlOutput NxController::tick(double now_s) {
                           output.dmmc_age_ms > config_.dmmc_stale_s * 1000.0 ||
                           tube_status_.faults != 0U;
   const bool chassis_stale = !chassis_valid;
-  const bool force_safe_feedforward = vision_lost || chassis_stale;
+  const bool chassis_fresh_required = task_manager_.mode() != TaskMode::Contest3;
+  const bool chassis_gate_failed = chassis_fresh_required && chassis_stale;
+  const bool force_safe_feedforward = vision_lost || chassis_gate_failed;
   if (vision_lost) {
     output.request_stop = true;
     output.reason = "vision_stale";
   }
-  if (chassis_stale) {
+  if (chassis_gate_failed) {
     output.request_stop = true;
     output.reason = "chassis_stale";
   }

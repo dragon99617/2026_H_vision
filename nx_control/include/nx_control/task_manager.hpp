@@ -8,7 +8,8 @@ namespace nx_control {
 
 class TaskManager {
  public:
-  void configure(TaskMode mode, double target_m, bool start_immediately);
+  void configure(TaskMode mode, double target_m, bool start_immediately,
+                 bool start_on_chassis_event = true);
   void start(double now_s);
   void stop();
   void force_safe(bool fault);
@@ -22,6 +23,9 @@ class TaskManager {
   double target_m() const { return current_reference_.position_m; }
 
  private:
+  bool is_static_sequence() const;
+  bool is_vehicle_task() const;
+
   TaskMode mode_ = TaskMode::Idle;
   TaskState state_ = TaskState::Idle;
   ReferencePoint current_reference_;
@@ -31,6 +35,7 @@ class TaskManager {
   int static_stage_ = 0;
   std::uint16_t previous_events_ = 0;
   bool armed_ = false;
+  bool start_on_chassis_event_ = true;
 };
 
 }  // namespace nx_control

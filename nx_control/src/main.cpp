@@ -2,7 +2,11 @@
 #include "nx_control/io.hpp"
 #include "nx_control/protocol.hpp"
 
+#include <termios.h>
+#include <unistd.h>
+
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -27,9 +31,61 @@ struct Options {
   std::string log = "logs/nx-control.csv";
   nx_control::TaskMode task = nx_control::TaskMode::HoldCenter;
   double target_m = 0.0;
+  bool target_set = false;
   bool start_immediately = true;
+  bool key_start = false;
   bool dry_run = false;
   double max_seconds = 0.0;
+};
+
+class KeyboardStart {
+ public:
+  explicit KeyboardStart(bool enabled) {
+    if (!enabled) return;
+    if (::isatty(STDIN_FILENO) == 0) {
+      throw std::runtime_error("--key-start requires an interactive terminal");
+    }
+    if (::tcgetattr(STDIN_FILENO, &saved_) != 0) {
+      throw std::runtime_error("cannot read terminal settings");
+    }
+    termios settings = saved_;
+    settings.c_lflag &= static_cast<tcflag_t>(~(ICANON | ECHO));
+    settings.c_cc[VMIN] = 0;
+    settings.c_cc[VTIME] = 0;
+    if (::tcsetattr(STDIN_FILENO, TCSANOW, &settings) != 0) {
+      throw std::runtime_error("cannot enable keyboard start");
+    }
+    active_ = true;
+  }
+
+  ~KeyboardStart() {
+    if (active_) ::tcsetattr(STDIN_FILENO, TCSANOW, &saved_);
+  }
+
+  KeyboardStart(const KeyboardStart&) = delete;
+  KeyboardStart& operator=(const KeyboardStart&) = delete;
+
+  bool consume_start() const {
+    bool requested = false;
+    char input[32];
+    while (true) {
+      const ssize_t count = ::read(STDIN_FILENO, input, sizeof(input));
+      if (count > 0) {
+        for (ssize_t index = 0; index < count; ++index) {
+          if (input[index] == 'd' || input[index] == 'D') requested = true;
+        }
+      } else if (count == 0 || errno == EAGAIN || errno == EWOULDBLOCK) {
+        break;
+      } else if (errno != EINTR) {
+        throw std::runtime_error("cannot read keyboard start key");
+      }
+    }
+    return requested;
+  }
+
+ private:
+  termios saved_{};
+  bool active_ = false;
 };
 
 nx_control::TaskMode parse_task(const std::string& value) {
@@ -38,7 +94,15 @@ nx_control::TaskMode parse_task(const std::string& value) {
   if (value == "center") return nx_control::TaskMode::HoldCenter;
   if (value == "target") return nx_control::TaskMode::HoldTarget;
   if (value == "auto") return nx_control::TaskMode::AutoVehicle;
-  throw std::invalid_argument("task must be idle, static, center, target, or auto");
+  if (value == "3" || value == "task3") return nx_control::TaskMode::Contest3;
+  if (value == "4" || value == "5" || value == "45" || value == "4-5" ||
+      value == "task4" || value == "task5" || value == "task45" ||
+      value == "task4_5") {
+    return nx_control::TaskMode::Contest45;
+  }
+  if (value == "6" || value == "task6") return nx_control::TaskMode::Contest6;
+  throw std::invalid_argument(
+      "task must be 3, 45, 6, idle, static, center, target, or auto");
 }
 
 Options parse_options(int argc, char** argv) {
@@ -56,20 +120,33 @@ Options parse_options(int argc, char** argv) {
     else if (argument == "--baud") options.baud = std::stoi(value());
     else if (argument == "--log") options.log = value();
     else if (argument == "--task") options.task = parse_task(value());
-    else if (argument == "--target-cm") options.target_m = std::stod(value()) / 100.0;
+    else if (argument == "--target-cm") {
+      options.target_m = std::stod(value()) / 100.0;
+      options.target_set = true;
+    }
     else if (argument == "--wait-start") options.start_immediately = false;
+    else if (argument == "--key-start" || argument == "--keyboard-start") {
+      options.key_start = true;
+      options.start_immediately = false;
+    }
     else if (argument == "--dry-run") options.dry_run = true;
     else if (argument == "--max-seconds") options.max_seconds = std::stod(value());
     else if (argument == "--help") {
       std::cout << "ball_nx_control [--config FILE] [--dmmc DEVICE] [--vision-port PORT]\n"
-                   "  [--task idle|static|center|target|auto] [--target-cm CM] [--wait-start]\n"
+                   "  [--task 3|45|6|idle|static|center|target|auto] [--target-cm CM]\n"
+                   "  [--wait-start | --key-start]\n"
                    "  [--log CSV] [--dry-run] [--max-seconds SECONDS]\n";
       std::exit(0);
     } else {
       throw std::invalid_argument("unknown option: " + argument);
     }
   }
-  if (std::abs(options.target_m) > 0.10) throw std::invalid_argument("target must be within +/-10 cm");
+  if (!std::isfinite(options.target_m) || std::abs(options.target_m) > 0.10) {
+    throw std::invalid_argument("target must be finite and within +/-10 cm");
+  }
+  if (options.task == nx_control::TaskMode::Contest6 && !options.target_set) {
+    throw std::invalid_argument("task 6 requires --target-cm CM");
+  }
   return options;
 }
 
@@ -78,11 +155,18 @@ Options parse_options(int argc, char** argv) {
 int main(int argc, char** argv) {
   try {
     const Options options = parse_options(argc, argv);
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
     const nx_control::ControlConfig config = nx_control::load_config(options.config);
     nx_control::NxController controller(config);
     const double started = nx_control::monotonic_seconds();
     controller.reset(started);
-    controller.configure_task(options.task, options.target_m, options.start_immediately);
+    controller.configure_task(options.task, options.target_m, options.start_immediately,
+                              !options.key_start);
+    KeyboardStart keyboard(options.key_start);
+    if (options.key_start) {
+      std::cerr << "keyboard start enabled: press d to start/restart the task\n";
+    }
 
     nx_control::UdpReceiver vision;
     const bool vision_udp_enabled = !options.dry_run;
@@ -109,11 +193,12 @@ int main(int argc, char** argv) {
     double next_tick = started;
     double next_report = started;
     std::uint32_t dry_sequence = 0;
-    std::signal(SIGINT, signal_handler);
-    std::signal(SIGTERM, signal_handler);
-
     while (!stopping.load()) {
       double now = nx_control::monotonic_seconds();
+      if (keyboard.consume_start()) {
+        controller.start_task(now);
+        std::cerr << "task started/restarted by key d\n";
+      }
       while (vision_udp_enabled) {
         const std::ptrdiff_t count = vision.read(buffer, sizeof(buffer));
         if (count <= 0) break;

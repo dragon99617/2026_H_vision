@@ -46,7 +46,7 @@ def analyze(path: Path) -> Dict[str, object]:
         if math.isfinite(finite(row, "vision_age_ms"))
     ]
     theta = [abs(finite(row, "theta_cmd_rad")) for row in rows]
-    theta_limit = math.radians(4.5)
+    theta_limit = math.radians(0.5)
     count = max(1, len(rows))
     return {
         "source": str(path),
