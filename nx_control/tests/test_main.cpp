@@ -336,8 +336,8 @@ void test_remote_clock_sync() {
 void test_mpc_constraints() {
   nx_control::ControlConfig config;
   check(std::abs(config.theta_limit_rad -
-                 2.0 * 3.14159265358979323846 / 180.0) < 1e-12,
-        "NX default angle limit matches DMMC02 2.0 degree hard limit");
+                 4.0 * 3.14159265358979323846 / 180.0) < 1e-12,
+        "NX default angle limit matches DMMC02 4.0 degree hard limit");
   check(std::abs(config.theta_rate_limit_rad_s -
                  5.0 * 3.14159265358979323846 / 180.0) < 1e-12,
         "NX default angle rate limit remains 5 degrees per second");
@@ -356,7 +356,7 @@ void test_mpc_constraints() {
                  expected_u_limit / config.input_scale_m_s2) < 1e-12 &&
             std::abs(problem.upper(config.horizon) -
                      expected_u_limit / config.input_scale_m_s2) < 1e-12,
-        "MPC input bounds are exactly plus/minus 2.0 degrees");
+        "MPC input bounds are exactly plus/minus 4.0 degrees");
 #ifdef NX_CONTROL_HAS_OSQP
   check(result.backend == "osqp", "production build selects the OSQP backend");
 #endif
@@ -495,7 +495,7 @@ void test_controller_angle_limit() {
 
   nx_control::ControlOutput output;
   double previous_theta_rad = 0.0;
-  for (std::uint32_t sequence = 1; sequence <= 30; ++sequence) {
+  for (std::uint32_t sequence = 1; sequence <= 50; ++sequence) {
     const double now_s = 20.0 + static_cast<double>(sequence) * config.period_s;
     const auto now_ms = static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
 
@@ -523,7 +523,7 @@ void test_controller_angle_limit() {
 
     output = controller.tick(now_s);
     check(output.command.theta_cmd_rad <= config.theta_limit_rad + 1e-12,
-          "controller final output does not exceed 2.0 degrees");
+          "controller final output does not exceed 4.0 degrees");
     check(output.command.theta_cmd_rad - previous_theta_rad <=
               config.theta_rate_limit_rad_s * config.period_s + 1e-12,
           "controller final output retains the 5 degrees per second rate limit");
@@ -531,10 +531,10 @@ void test_controller_angle_limit() {
   }
 
   check(std::abs(output.command.theta_cmd_rad - config.theta_limit_rad) < 1e-12,
-        "controller final output clamps at the same 2.0 degree limit as MPC");
+        "controller final output clamps at the same 4.0 degree limit as MPC");
   const auto packet = nx_control::protocol::encode_control_command(output.command);
-  check(packet[16] == 0xC8U && packet[17] == 0x00U,
-        "tube-control-v3 still encodes 2.0 degrees as 200 cdeg");
+  check(packet[16] == 0x90U && packet[17] == 0x01U,
+        "tube-control-v3 still encodes 4.0 degrees as 400 cdeg");
   check(packet[18] == 0xF4U && packet[19] == 0x01U,
         "tube-control-v3 still encodes the rate limit as 500 cdeg per second");
 }

@@ -175,6 +175,6 @@ python3 tools/analyze_log.py replay-output.csv --json replay-metrics.json
 当前代码已通过 OSQP 0.6.3 软件构建、单测和离线重放；相机、DMMC及底盘实机接口
 仍需按上述顺序验收，不能用软件测试结果代替真机验收。
 
-NX的摆杆命令硬限幅为`±2.0°`，角速度限制保持为`5°/s`，与DMMC02新固件的
-`hard_angle_limit_deg=2.0°`一致。`tube-control-v3`在线路上仍使用厘度：
+NX的摆杆命令硬限幅为`±4.0°`，角速度限制保持为`5°/s`，与DMMC02新固件的
+`hard_angle_limit_deg=4.0°`一致。`tube-control-v3`在线路上仍使用厘度：
 `theta_cmd_cdeg`的1 LSB为`0.01°`。

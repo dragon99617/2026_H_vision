@@ -170,7 +170,7 @@ struct ControlConfig {
   double actuator_delay_s = 0.0;
   double rolling_lambda = kRollingLambda;
   int horizon = 30;
-  double theta_limit_rad = 2.0 * 3.14159265358979323846 / 180.0;
+  double theta_limit_rad = 4.0 * 3.14159265358979323846 / 180.0;
   double theta_rate_limit_rad_s = 5.0 * 3.14159265358979323846 / 180.0;
   double position_soft_limit_m = 0.105;
   double position_safe_limit_m = 0.115;
