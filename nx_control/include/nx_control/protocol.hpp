@@ -65,6 +65,7 @@ class Mc02StreamParser {
 std::optional<VisionMeasurement> decode_vision(const Frame& frame, double receive_time_s);
 std::optional<TubeStatus> decode_tube_status(const Frame& frame, double receive_time_s);
 std::optional<ChassisState> decode_chassis_state(const Frame& frame, double receive_time_s);
+std::uint8_t control_state_to_mc02(TaskState state);
 std::vector<std::uint8_t> encode_tube_control_v3(const TubeControlV3Command& command);
 std::vector<std::uint8_t> encode_control_command(const ControlCommand& command);
 

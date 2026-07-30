@@ -8,10 +8,14 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
+#include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -22,6 +26,16 @@ std::atomic<bool> stopping{false};
 
 void signal_handler(int) { stopping.store(true); }
 
+std::uint64_t parse_u64(const std::string& value, const std::string& option) {
+  if (value.empty() || value.front() == '-') {
+    throw std::invalid_argument("invalid value for " + option);
+  }
+  std::size_t consumed = 0;
+  const unsigned long long result = std::stoull(value, &consumed, 0);
+  if (consumed != value.size()) throw std::invalid_argument("invalid value for " + option);
+  return static_cast<std::uint64_t>(result);
+}
+
 struct Options {
   std::string config = "config/nx-control.conf";
   std::string dmmc = "/dev/ttyACM0";
@@ -29,6 +43,8 @@ struct Options {
   std::uint16_t vision_port = 29001;
   int baud = 921600;
   std::string log = "logs/nx-control.csv";
+  std::string state_file = "state/tube-control-v3.seq";
+  std::uint32_t start_command_id = 1U;
   nx_control::TaskMode task = nx_control::TaskMode::HoldCenter;
   double target_m = 0.0;
   bool target_set = false;
@@ -119,6 +135,14 @@ Options parse_options(int argc, char** argv) {
     else if (argument == "--vision-port") options.vision_port = static_cast<std::uint16_t>(std::stoul(value()));
     else if (argument == "--baud") options.baud = std::stoi(value());
     else if (argument == "--log") options.log = value();
+    else if (argument == "--state-file") options.state_file = value();
+    else if (argument == "--start-command-id") {
+      const std::uint64_t parsed = parse_u64(value(), argument);
+      if (parsed > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::invalid_argument("--start-command-id exceeds uint32");
+      }
+      options.start_command_id = static_cast<std::uint32_t>(parsed);
+    }
     else if (argument == "--task") options.task = parse_task(value());
     else if (argument == "--target-cm") {
       options.target_m = std::stod(value()) / 100.0;
@@ -135,7 +159,8 @@ Options parse_options(int argc, char** argv) {
       std::cout << "ball_nx_control [--config FILE] [--dmmc DEVICE] [--vision-port PORT]\n"
                    "  [--task 3|45|6|idle|static|center|target|auto] [--target-cm CM]\n"
                    "  [--wait-start | --key-start]\n"
-                   "  [--log CSV] [--dry-run] [--max-seconds SECONDS]\n";
+                   "  [--log CSV] [--state-file FILE] [--start-command-id ID]\n"
+                   "  [--dry-run] [--max-seconds SECONDS]\n";
       std::exit(0);
     } else {
       throw std::invalid_argument("unknown option: " + argument);
@@ -146,6 +171,9 @@ Options parse_options(int argc, char** argv) {
   }
   if (options.task == nx_control::TaskMode::Contest6 && !options.target_set) {
     throw std::invalid_argument("task 6 requires --target-cm CM");
+  }
+  if (options.state_file.empty() && !options.dry_run) {
+    throw std::invalid_argument("--state-file cannot be empty");
   }
   return options;
 }
@@ -175,6 +203,12 @@ int main(int argc, char** argv) {
     if (vision_udp_enabled && !vision.open(options.vision_bind, options.vision_port)) {
       throw std::runtime_error("cannot bind vision UDP: " + vision.last_error());
     }
+    std::unique_ptr<nx_control::PersistentSequence> persistent_sequence;
+    if (!options.dry_run) {
+      persistent_sequence = std::make_unique<nx_control::PersistentSequence>(
+          options.state_file, options.start_command_id);
+      persistent_sequence->prepare();
+    }
     nx_control::SerialPort serial;
     double next_serial_retry = started;
     if (!options.dry_run && !serial.open(options.dmmc, options.baud)) {
@@ -194,6 +228,8 @@ int main(int argc, char** argv) {
     std::uint8_t buffer[512];
     double next_tick = started;
     double next_report = started;
+    bool last_reported_safety_latched = false;
+    std::uint64_t last_reported_safety_event_id = 0;
     std::uint32_t dry_sequence = 0;
     while (!stopping.load()) {
       double now = nx_control::monotonic_seconds();
@@ -259,15 +295,31 @@ int main(int argc, char** argv) {
           controller.ingest_vision(vision_measurement);
           have_tube = have_chassis = true;
         }
-        const nx_control::ControlOutput output = controller.tick(now);
+        const auto command_id =
+            persistent_sequence
+                ? std::optional<std::uint32_t>(persistent_sequence->next())
+                : std::nullopt;
+        const nx_control::ControlOutput output = controller.tick(now, command_id);
         const std::vector<std::uint8_t> packet =
             nx_control::protocol::encode_control_command(output.command);
         if (serial.fd() >= 0 && !serial.write_all(packet.data(), packet.size())) {
-          std::cerr << "DMMC serial write failed: " << serial.last_error() << '\n';
+          std::cerr << "DMMC serial write failed after command_id="
+                    << output.command.command_id << ": " << serial.last_error()
+                    << "; ID will not be retried\n";
           serial.close();
         }
         logger.write(now, output, have_tube ? &latest_tube : nullptr,
                      have_chassis ? &latest_chassis : nullptr);
+        if (output.safety_event_id != last_reported_safety_event_id) {
+          std::cerr << "SAFETY LATCHED event_id=" << output.safety_event_id
+                    << " command_id=" << output.command.command_id
+                    << " reason=" << output.last_stop_reason << '\n';
+        } else if (last_reported_safety_latched && !output.safety_latched) {
+          std::cerr << "SAFETY CLEARED by operator restart command_id="
+                    << output.command.command_id << '\n';
+        }
+        last_reported_safety_latched = output.safety_latched;
+        last_reported_safety_event_id = output.safety_event_id;
         if (now >= next_report) {
           std::cerr << "state=" << static_cast<int>(output.command.control_state)
                     << " x=" << output.estimate.position_m * 100.0 << "cm"
@@ -285,6 +337,7 @@ int main(int argc, char** argv) {
       if (options.max_seconds > 0.0 && now - started >= options.max_seconds) break;
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    if (persistent_sequence) persistent_sequence->checkpoint();
     return 0;
   } catch (const std::exception& error) {
     std::cerr << "fatal: " << error.what() << '\n';

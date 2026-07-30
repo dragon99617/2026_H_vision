@@ -1,25 +1,33 @@
 #include "nx_control/io.hpp"
+#include "nx_control/protocol.hpp"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/file.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 
 namespace nx_control {
 namespace {
+
+constexpr std::uint64_t kSequenceReservationSize = 4096U;
+constexpr std::size_t kSequenceStateRecordSize = 21U;
 
 speed_t baud_flag(int baud) {
   switch (baud) {
@@ -53,6 +61,94 @@ std::string trim(std::string value) {
 
 double monotonic_seconds() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+PersistentSequence::PersistentSequence(const std::string& path, std::uint32_t initial)
+    : path_(path) {
+  const std::filesystem::path state_path(path);
+  if (!state_path.parent_path().empty()) {
+    std::filesystem::create_directories(state_path.parent_path());
+  }
+  fd_ = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+  if (fd_ < 0) throw_system_error("cannot open sequence file");
+  if (::flock(fd_, LOCK_EX | LOCK_NB) != 0) {
+    const int saved_errno = errno;
+    ::close(fd_);
+    fd_ = -1;
+    errno = saved_errno;
+    throw_system_error("sequence file is already locked by another sender");
+  }
+  next_unreserved_ = read_state(initial);
+  next_ = next_unreserved_;
+  reserved_end_ = next_unreserved_;
+}
+
+PersistentSequence::~PersistentSequence() {
+  if (fd_ >= 0) ::close(fd_);
+}
+
+void PersistentSequence::prepare() {
+  if (next_ == reserved_end_) reserve();
+}
+
+std::uint32_t PersistentSequence::next() {
+  if (next_ == reserved_end_) reserve();
+  const std::uint64_t value = next_++;
+  return static_cast<std::uint32_t>(value);
+}
+
+void PersistentSequence::checkpoint() { persist(next_); }
+
+[[noreturn]] void PersistentSequence::throw_system_error(
+    const std::string& message) const {
+  throw std::runtime_error(message + " '" + path_ + "': " + std::strerror(errno));
+}
+
+std::uint64_t PersistentSequence::read_state(std::uint32_t initial) {
+  char record[kSequenceStateRecordSize + 1U];
+  const ssize_t count = ::pread(fd_, record, sizeof(record), 0);
+  if (count < 0) throw_system_error("cannot read sequence file");
+  if (count == 0) return initial;
+  if (count != static_cast<ssize_t>(kSequenceStateRecordSize) || record[20] != '\n') {
+    throw std::runtime_error("invalid sequence file '" + path_ +
+                             "'; refusing to risk an ID reuse");
+  }
+  std::uint64_t value = 0;
+  for (std::size_t index = 0; index < 20U; ++index) {
+    if (record[index] < '0' || record[index] > '9') {
+      throw std::runtime_error("invalid sequence file '" + path_ +
+                               "'; refusing to risk an ID reuse");
+    }
+    value = value * 10U + static_cast<unsigned>(record[index] - '0');
+  }
+  if (value > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) + 1U) {
+    throw std::runtime_error("sequence file value is out of range");
+  }
+  return value;
+}
+
+void PersistentSequence::reserve() {
+  constexpr std::uint64_t kEnd =
+      static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) + 1U;
+  if (next_unreserved_ >= kEnd) {
+    throw std::runtime_error("command_id space exhausted; refusing to wrap or repeat");
+  }
+  next_ = next_unreserved_;
+  reserved_end_ = std::min(kEnd, next_ + kSequenceReservationSize);
+  persist(reserved_end_);
+  next_unreserved_ = reserved_end_;
+}
+
+void PersistentSequence::persist(std::uint64_t value) {
+  std::ostringstream stream;
+  stream << std::setw(20) << std::setfill('0') << value << '\n';
+  const std::string record = stream.str();
+  const ssize_t count = ::pwrite(fd_, record.data(), record.size(), 0);
+  if (count != static_cast<ssize_t>(record.size())) {
+    if (count >= 0) errno = EIO;
+    throw_system_error("cannot update sequence file");
+  }
+  if (::fdatasync(fd_) != 0) throw_system_error("cannot sync sequence file");
 }
 
 ControlConfig load_config(const std::string& path) {
@@ -111,7 +207,13 @@ ControlConfig load_config(const std::string& path) {
   number("vision_v2_latency_s", config.vision_v2_latency_s);
   number("vision_frame_rate_hz", config.vision_frame_rate_hz);
   number("vision_decay_start_s", config.vision_decay_start_s);
-  number("vision_loss_stop_s", config.vision_loss_stop_s);
+  if (values.find("vision_loss_hold_s") != values.end()) {
+    number("vision_loss_hold_s", config.vision_loss_hold_s);
+  } else {
+    // Backward compatibility: the old stop threshold is now the soft HOLD threshold.
+    number("vision_loss_stop_s", config.vision_loss_hold_s);
+  }
+  number("vision_loss_safe_s", config.vision_loss_safe_s);
   number("chassis_filter_tau_s", config.chassis_filter_tau_s);
   number("chassis_stale_s", config.chassis_stale_s);
   number("dmmc_stale_s", config.dmmc_stale_s);
@@ -131,7 +233,8 @@ ControlConfig load_config(const std::string& path) {
         config.predicted_min_confidence >= 0.0 && config.predicted_min_confidence <= 1.0 &&
         config.vision_frame_rate_hz > 0.0 &&
         config.vision_decay_start_s >= 0.0 &&
-        config.vision_decay_start_s < config.vision_loss_stop_s &&
+        config.vision_decay_start_s < config.vision_loss_hold_s &&
+        config.vision_loss_hold_s < config.vision_loss_safe_s &&
         config.position_soft_limit_m > 0.0 &&
         config.position_safe_limit_m > config.position_soft_limit_m)) {
     throw std::runtime_error("invalid control config limits");
@@ -180,6 +283,14 @@ bool SerialPort::open(const std::string& path, int baud) {
   }
   termios settings{};
   try {
+    if (::flock(fd_, LOCK_EX | LOCK_NB) != 0) {
+      throw std::runtime_error("serial device is already locked: " +
+                               std::string(std::strerror(errno)));
+    }
+    if (::ioctl(fd_, TIOCEXCL) != 0) {
+      throw std::runtime_error("cannot claim exclusive serial access: " +
+                               std::string(std::strerror(errno)));
+    }
     if (::tcgetattr(fd_, &settings) != 0) throw std::runtime_error(std::strerror(errno));
     ::cfmakeraw(&settings);
     const speed_t speed = baud_flag(baud);
@@ -238,7 +349,14 @@ bool CsvLogger::open(const std::string& path) {
   if (!file.parent_path().empty()) std::filesystem::create_directories(file.parent_path());
   stream_.open(file);
   if (!stream_) return false;
-  stream_ << "time_s,command_id,source_frame_id,state,x_m,v_m_s,d_m_s2,x_ref_m,u_cmd_m_s2,"
+  rows_ = 0;
+  have_safety_state_ = false;
+  last_safety_latched_ = false;
+  last_safety_event_id_ = 0;
+  last_wire_control_state_ = 0;
+  stream_ << "time_s,command_id,source_frame_id,state,wire_control_state,wire_flags,"
+             "dmmc_controller_state,safety_latched,safety_event_id,last_stop_reason,"
+             "x_m,v_m_s,d_m_s2,x_ref_m,u_cmd_m_s2,"
              "theta_cmd_rad,theta_actual_rad,motor_position_rad,motor_velocity_rad_s,"
              "motor_torque_nm,a_actual_m_s2,a_ref_m_s2,v_actual_m_s,v_ref_m_s,jerk_ref_m_s3,"
              "track_error_m,track_quality,chassis_events,vision_age_ms,"
@@ -250,8 +368,16 @@ bool CsvLogger::open(const std::string& path) {
 void CsvLogger::write(double now_s, const ControlOutput& output, const TubeStatus* tube,
                       const ChassisState* chassis) {
   if (!stream_) return;
+  const std::uint8_t wire_control_state =
+      protocol::control_state_to_mc02(output.command.control_state);
   stream_ << std::fixed << std::setprecision(9) << now_s << ',' << output.command.command_id << ','
           << output.command.source_frame_id << ',' << static_cast<int>(output.command.control_state)
+          << ',' << static_cast<int>(wire_control_state)
+          << ',' << static_cast<int>(output.command.flags)
+          << ',' << (tube ? static_cast<int>(tube->state) : -1)
+          << ',' << (output.safety_latched ? 1 : 0)
+          << ',' << output.safety_event_id
+          << ',' << output.last_stop_reason
           << ',' << output.estimate.position_m << ',' << output.estimate.velocity_m_s << ','
           << output.estimate.disturbance_m_s2 << ',' << output.reference.position_m << ','
           << output.u_command_m_s2 << ',' << output.command.theta_cmd_rad << ','
@@ -280,7 +406,17 @@ void CsvLogger::write(double now_s, const ControlOutput& output, const TubeStatu
     stream_ << output.predicted_position_m[index];
   }
   stream_ << '\n';
-  if (++rows_ % 50 == 0) stream_.flush();
+  const bool safety_transition =
+      !have_safety_state_ || output.safety_latched != last_safety_latched_ ||
+      output.safety_event_id != last_safety_event_id_ ||
+      (wire_control_state != last_wire_control_state_ &&
+       (wire_control_state >= 3U || last_wire_control_state_ >= 3U));
+  have_safety_state_ = true;
+  last_safety_latched_ = output.safety_latched;
+  last_safety_event_id_ = output.safety_event_id;
+  last_wire_control_state_ = wire_control_state;
+  ++rows_;
+  if (safety_transition || rows_ % 50 == 0) stream_.flush();
 }
 
 }  // namespace nx_control

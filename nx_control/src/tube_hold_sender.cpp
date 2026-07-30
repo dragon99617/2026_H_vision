@@ -1,19 +1,12 @@
 #include "nx_control/io.hpp"
 #include "nx_control/protocol.hpp"
 
-#include <fcntl.h>
-#include <sys/file.h>
-#include <unistd.h>
-
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cerrno>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
-#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -27,9 +20,7 @@
 namespace {
 
 constexpr std::uint32_t kDefaultStartCommandId = 1U;
-constexpr std::uint64_t kReservationSize = 4096U;
 constexpr auto kPeriod = std::chrono::milliseconds(20);
-constexpr std::size_t kStateRecordSize = 21U;
 
 std::atomic<bool> stopping{false};
 
@@ -109,108 +100,6 @@ Options parse_options(int argc, char** argv) {
   return options;
 }
 
-class PersistentSequence {
- public:
-  PersistentSequence(const std::string& path, std::uint32_t initial) : path_(path) {
-    const std::filesystem::path state_path(path);
-    if (!state_path.parent_path().empty()) {
-      std::filesystem::create_directories(state_path.parent_path());
-    }
-    fd_ = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-    if (fd_ < 0) throw_system_error("cannot open sequence file");
-    if (::flock(fd_, LOCK_EX | LOCK_NB) != 0) {
-      const int saved_errno = errno;
-      ::close(fd_);
-      fd_ = -1;
-      errno = saved_errno;
-      throw_system_error("sequence file is already locked by another sender");
-    }
-    next_unreserved_ = read_state(initial);
-    next_ = next_unreserved_;
-    reserved_end_ = next_unreserved_;
-  }
-
-  ~PersistentSequence() {
-    if (fd_ >= 0) ::close(fd_);
-  }
-
-  PersistentSequence(const PersistentSequence&) = delete;
-  PersistentSequence& operator=(const PersistentSequence&) = delete;
-
-  void prepare() {
-    if (next_ == reserved_end_) reserve();
-  }
-
-  std::uint32_t next() {
-    if (next_ == reserved_end_) reserve();
-    const std::uint64_t value = next_++;
-    return static_cast<std::uint32_t>(value);
-  }
-
-  // On a clean stop, retain the exact next ID.  On an abrupt stop, the
-  // pre-synced reservation watermark remains, so possibly transmitted IDs are
-  // skipped rather than reused.
-  void checkpoint() { persist(next_); }
-
- private:
-  [[noreturn]] void throw_system_error(const std::string& message) const {
-    throw std::runtime_error(message + " '" + path_ + "': " + std::strerror(errno));
-  }
-
-  std::uint64_t read_state(std::uint32_t initial) {
-    char record[kStateRecordSize + 1U];
-    const ssize_t count = ::pread(fd_, record, sizeof(record), 0);
-    if (count < 0) throw_system_error("cannot read sequence file");
-    if (count == 0) return initial;
-    if (count != static_cast<ssize_t>(kStateRecordSize) || record[20] != '\n') {
-      throw std::runtime_error("invalid sequence file '" + path_ +
-                               "'; refusing to risk an ID reuse");
-    }
-    std::uint64_t value = 0;
-    for (std::size_t index = 0; index < 20U; ++index) {
-      if (record[index] < '0' || record[index] > '9') {
-        throw std::runtime_error("invalid sequence file '" + path_ +
-                                 "'; refusing to risk an ID reuse");
-      }
-      value = value * 10U + static_cast<unsigned>(record[index] - '0');
-    }
-    if (value > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) + 1U) {
-      throw std::runtime_error("sequence file value is out of range");
-    }
-    return value;
-  }
-
-  void reserve() {
-    constexpr std::uint64_t kEnd =
-        static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) + 1U;
-    if (next_unreserved_ >= kEnd) {
-      throw std::runtime_error("command_id space exhausted; refusing to wrap or repeat");
-    }
-    next_ = next_unreserved_;
-    reserved_end_ = std::min(kEnd, next_ + kReservationSize);
-    persist(reserved_end_);
-    next_unreserved_ = reserved_end_;
-  }
-
-  void persist(std::uint64_t value) {
-    std::ostringstream stream;
-    stream << std::setw(20) << std::setfill('0') << value << '\n';
-    const std::string record = stream.str();
-    const ssize_t count = ::pwrite(fd_, record.data(), record.size(), 0);
-    if (count != static_cast<ssize_t>(record.size())) {
-      if (count >= 0) errno = EIO;
-      throw_system_error("cannot update sequence file");
-    }
-    if (::fdatasync(fd_) != 0) throw_system_error("cannot sync sequence file");
-  }
-
-  std::string path_;
-  int fd_ = -1;
-  std::uint64_t next_ = 0;
-  std::uint64_t reserved_end_ = 0;
-  std::uint64_t next_unreserved_ = 0;
-};
-
 std::uint32_t nx_time_ms() {
   const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now().time_since_epoch());
@@ -236,10 +125,10 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    std::unique_ptr<PersistentSequence> persistent_sequence;
+    std::unique_ptr<nx_control::PersistentSequence> persistent_sequence;
     if (!options.dry_run) {
-      persistent_sequence =
-          std::make_unique<PersistentSequence>(options.state_file, options.start_command_id);
+      persistent_sequence = std::make_unique<nx_control::PersistentSequence>(
+          options.state_file, options.start_command_id);
     }
     nx_control::SerialPort serial;
     if (!options.dry_run && !serial.open(options.dmmc, options.baud)) {

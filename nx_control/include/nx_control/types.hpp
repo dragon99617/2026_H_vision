@@ -160,8 +160,11 @@ struct ControlOutput {
   bool used_fallback = false;
   bool request_slowdown = false;
   bool request_stop = false;
+  bool safety_latched = false;
+  std::uint64_t safety_event_id = 0;
   std::vector<double> predicted_position_m;
   std::string reason;
+  std::string last_stop_reason;
 };
 
 struct ControlConfig {
@@ -191,7 +194,8 @@ struct ControlConfig {
   double vision_v2_latency_s = 0.045;
   double vision_frame_rate_hz = 60.0;
   double vision_decay_start_s = 0.040;
-  double vision_loss_stop_s = 0.100;
+  double vision_loss_hold_s = 0.100;
+  double vision_loss_safe_s = 0.250;
   double chassis_filter_tau_s = 0.040;
   double chassis_stale_s = 0.100;
   double dmmc_stale_s = 0.050;

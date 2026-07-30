@@ -82,11 +82,14 @@ NX任务状态在线路上按下表映射：
 | Safe | Safe (`3`) |
 | Fault | Fault (`4`) |
 
-`flags`：bit0机构使能、bit1清除可恢复告警、bit2建议底盘减速、
+`flags`：bit0机构使能、bit1清除通信可恢复告警（`CLEAR_COMM_WARNING`）、
+bit2建议底盘减速、
 bit3建议底盘停车。
 
 Task3等待启动按键时使用`StandbyHold`，固定下发0°并保持机构使能。
 固定HOLD通信工具也在线路上直接发送`control_state=1`。
+bit1是通信状态恢复标志，不是Ozone解锁码。操作员按`d`重启任务后的第一条
+非安全命令使用`flags=0x03`，后续正常命令恢复`0x01`。
 
 固定测试向量：
 

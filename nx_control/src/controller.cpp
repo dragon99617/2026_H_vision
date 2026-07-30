@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 
 namespace nx_control {
 namespace {
@@ -25,7 +26,15 @@ void NxController::configure_task(TaskMode mode, double target_m, bool start_imm
   task_manager_.configure(mode, target_m, start_immediately, start_on_chassis_event);
 }
 
-void NxController::start_task(double now_s) { task_manager_.start(now_s); }
+void NxController::start_task(double now_s) {
+  safety_latched_ = false;
+  safety_fault_latched_ = false;
+  clear_comm_warning_pending_ = true;
+  previous_command_u_ = 0.0;
+  solver_failures_ = 0;
+  first_solver_failure_s_ = -1.0;
+  task_manager_.start(now_s);
+}
 
 void NxController::reset(double now_s) {
   observer_.reset(now_s);
@@ -42,13 +51,18 @@ void NxController::reset(double now_s) {
   previous_command_u_ = 0.0;
   solver_failures_ = 0;
   first_solver_failure_s_ = -1.0;
+  safety_latched_ = false;
+  safety_fault_latched_ = false;
+  clear_comm_warning_pending_ = false;
+  safety_event_id_ = 0;
+  last_stop_reason_.clear();
 }
 
 void NxController::ingest_vision(VisionMeasurement measurement) {
   const bool had_previous_frame = have_vision_frame_;
   const std::uint32_t previous_frame_id = last_vision_frame_id_;
   if (had_previous_frame && !sequence_is_newer(measurement.frame_id, previous_frame_id)) {
-    if (measurement.receive_time_s - last_vision_receive_s_ <= config_.vision_loss_stop_s) return;
+    if (measurement.receive_time_s - last_vision_receive_s_ <= config_.vision_loss_safe_s) return;
     v2_clock_initialized_ = false;
   }
   have_vision_frame_ = true;
@@ -146,7 +160,43 @@ double NxController::fallback_command(const ObserverState& estimate,
              config_.rolling_lambda;
 }
 
-ControlOutput NxController::tick(double now_s) {
+bool NxController::hold_prediction_crosses_soft_boundary(
+    const ObserverState& estimate, double actuator_u_m_s2,
+    double chassis_acceleration_m_s2, double horizon_s) const {
+  double position = estimate.position_m;
+  double velocity = estimate.velocity_m_s;
+  double actuator_angle_rad = std::atan2(actuator_u_m_s2, kGravity);
+  for (double t = config_.period_s; t <= horizon_s + 1e-9; t += config_.period_s) {
+    const double angle_step = config_.theta_rate_limit_rad_s * config_.period_s;
+    actuator_angle_rad =
+        std::clamp(0.0, actuator_angle_rad - angle_step, actuator_angle_rad + angle_step);
+    const double projected_u = kGravity * std::tan(actuator_angle_rad);
+    const double acceleration =
+        estimate.disturbance_m_s2 +
+        config_.rolling_lambda * (projected_u - chassis_acceleration_m_s2);
+    position += velocity * config_.period_s +
+                0.5 * acceleration * config_.period_s * config_.period_s;
+    velocity += acceleration * config_.period_s;
+    if (std::abs(position) >= config_.position_soft_limit_m) return true;
+  }
+  return false;
+}
+
+void NxController::latch_safety(const std::string& reason, bool fault) {
+  if (!safety_latched_) {
+    safety_latched_ = true;
+    safety_fault_latched_ = fault;
+    ++safety_event_id_;
+    last_stop_reason_ = reason.empty() ? "unspecified_safety_stop" : reason;
+    clear_comm_warning_pending_ = false;
+  } else if (fault) {
+    safety_fault_latched_ = true;
+  }
+  task_manager_.force_safe(safety_fault_latched_);
+}
+
+ControlOutput NxController::tick(double now_s,
+                                 std::optional<std::uint32_t> command_id) {
   if (last_tick_s_ == 0.0) reset(now_s);
   const bool chassis_valid = chassis_sync_.valid(now_s);
   const double chassis_acceleration =
@@ -180,16 +230,22 @@ ControlOutput NxController::tick(double now_s) {
                                  : acceleration_forecast.front() +
                                        output.reference.acceleration_m_s2 / config_.rolling_lambda;
 
-  const bool vision_lost = output.vision_age_ms > config_.vision_loss_stop_s * 1000.0;
+  const double vision_age_s = output.vision_age_ms / 1000.0;
+  const bool vision_soft_hold =
+      !contest3_waiting_for_start &&
+      vision_age_s >= config_.vision_loss_hold_s &&
+      vision_age_s <= config_.vision_loss_safe_s;
+  const bool vision_hard_lost =
+      !contest3_waiting_for_start && vision_age_s > config_.vision_loss_safe_s;
   const bool dmmc_stale = !have_tube_status_ ||
                           output.dmmc_age_ms > config_.dmmc_stale_s * 1000.0 ||
                           tube_status_.faults != 0U;
   const bool chassis_stale = !chassis_valid;
   const bool chassis_fresh_required = task_manager_.mode() != TaskMode::Contest3;
   const bool chassis_gate_failed = chassis_fresh_required && chassis_stale;
-  const bool vision_gate_failed = !contest3_waiting_for_start && vision_lost;
-  const bool force_safe_feedforward = vision_gate_failed || chassis_gate_failed;
-  if (vision_gate_failed) {
+  const bool force_safe_feedforward =
+      vision_soft_hold || vision_hard_lost || chassis_gate_failed || safety_latched_;
+  if (vision_hard_lost) {
     output.request_stop = true;
     output.reason = "vision_stale";
   }
@@ -230,11 +286,10 @@ ControlOutput NxController::tick(double now_s) {
       output.used_fallback = true;
       requested_u = fallback_command(output.estimate, output.reference, feedforward);
     }
-    const double vision_age_s = output.vision_age_ms / 1000.0;
     if (vision_age_s > config_.vision_decay_start_s) {
       const double correction_scale = std::clamp(
-          (config_.vision_loss_stop_s - vision_age_s) /
-              std::max(1e-6, config_.vision_loss_stop_s - config_.vision_decay_start_s),
+          (config_.vision_loss_hold_s - vision_age_s) /
+              std::max(1e-6, config_.vision_loss_hold_s - config_.vision_decay_start_s),
           0.0, 1.0);
       requested_u = feedforward + correction_scale * (requested_u - feedforward);
     }
@@ -260,6 +315,22 @@ ControlOutput NxController::tick(double now_s) {
        output.max_predicted_slack_m > 0.0001)) {
     output.request_slowdown = true;
   }
+  const bool outside_soft_boundary =
+      std::abs(output.estimate.position_m) >= config_.position_soft_limit_m ||
+      (latest_visual_position_valid_ &&
+       std::abs(latest_visual_position_m_) >= config_.position_soft_limit_m);
+  const double prediction_horizon_s =
+      std::max(0.0, config_.vision_loss_safe_s - vision_age_s);
+  const bool predicted_soft_boundary =
+      vision_soft_hold &&
+      hold_prediction_crosses_soft_boundary(output.estimate, actual_u,
+                                            chassis_acceleration, prediction_horizon_s);
+  if (vision_soft_hold && (outside_soft_boundary || predicted_soft_boundary)) {
+    output.request_stop = true;
+    output.reason =
+        outside_soft_boundary ? "vision_lost_outside_soft_boundary"
+                              : "vision_lost_predicted_soft_boundary";
+  }
   if (!contest3_waiting_for_start &&
       (std::abs(output.estimate.position_m) > config_.position_safe_limit_m ||
        (latest_visual_position_valid_ &&
@@ -267,26 +338,58 @@ ControlOutput NxController::tick(double now_s) {
     output.request_stop = true;
     output.reason = "ball_safety_boundary";
   }
-  if (dmmc_stale || contest3_waiting_for_start) requested_u = 0.0;
-  requested_u = contest3_waiting_for_start ? 0.0 : rate_limit_and_clamp(requested_u);
+  if (output.request_stop) latch_safety(output.reason, dmmc_stale);
+  if (safety_latched_) {
+    output.request_stop = true;
+    output.reason = last_stop_reason_;
+  } else if (vision_soft_hold) {
+    output.reason = "vision_soft_hold";
+  }
+
+  const bool force_zero_command =
+      safety_latched_ || vision_soft_hold || dmmc_stale || contest3_waiting_for_start;
+  requested_u = force_zero_command ? 0.0 : rate_limit_and_clamp(requested_u);
   previous_command_u_ = requested_u;
   output.u_command_m_s2 = requested_u;
   output.solver_failures = solver_failures_;
+  output.safety_latched = safety_latched_;
+  output.safety_event_id = safety_event_id_;
+  output.last_stop_reason = last_stop_reason_;
 
   ControlCommand command;
-  command.command_id = ++command_id_;
+  if (command_id.has_value()) {
+    command.command_id = *command_id;
+    command_id_ = *command_id;
+  } else {
+    if (command_id_ == std::numeric_limits<std::uint32_t>::max()) {
+      throw std::runtime_error("command_id space exhausted; refusing to wrap or repeat");
+    }
+    command.command_id = ++command_id_;
+  }
   command.source_frame_id = last_vision_frame_id_;
   command.nx_time_ms = static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
   command.theta_cmd_rad = std::atan2(requested_u, kGravity);
   command.theta_rate_limit_rad_s = config_.theta_rate_limit_rad_s;
   command.ttl_ms = 60;
-  command.control_state = output.request_stop
-                              ? (dmmc_stale ? TaskState::Fault : TaskState::Safe)
-                              : (contest3_waiting_for_start ? TaskState::StandbyHold
-                                                            : task_manager_.state());
-  command.flags = dmmc_stale ? 0U : 0x01U;
-  if (output.request_slowdown) command.flags |= 0x04U;
-  if (output.request_stop) command.flags |= 0x08U;
+  command.control_state =
+      safety_latched_
+          ? (safety_fault_latched_ ? TaskState::Fault : TaskState::Safe)
+          : ((vision_soft_hold || contest3_waiting_for_start)
+                 ? TaskState::StandbyHold
+                 : task_manager_.state());
+  const bool restart_first_frame =
+      clear_comm_warning_pending_ &&
+      command.control_state != TaskState::Idle &&
+      command.control_state != TaskState::Safe &&
+      command.control_state != TaskState::Fault;
+  if (restart_first_frame) {
+    command.flags = 0x03U;
+    clear_comm_warning_pending_ = false;
+  } else {
+    command.flags = dmmc_stale ? 0U : 0x01U;
+    if (output.request_slowdown) command.flags |= 0x04U;
+    if (output.request_stop) command.flags |= 0x08U;
+  }
   output.command = command;
   return output;
 }

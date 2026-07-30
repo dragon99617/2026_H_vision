@@ -14,7 +14,8 @@ DMMC 管道实际角和底盘状态，输出 `tube-control-v3`，不控制车轮
   角度、角速度硬约束与球位置软约束均直接进入QP；
 - OSQP 0.6.x生产后端，以及无需外部求解器、仅供构建和回归测试的稠密ADMM后端；
 - 单次QP失败使用上一最优序列移位，连续失败切换前馈+状态反馈备用控制，持续失败
-  请求停车；视觉、底盘、DMMC超时和±11.5 cm边界均进入安全标志；
+  请求停车；视觉丢失100～250 ms先进入0° HOLD软保护，超过250 ms或软边界存在
+  当前/预测风险时进入锁存SAFE；底盘、DMMC超时和±11.5 cm边界也会触发安全锁存；
 - 静态 `0→+5→-5 cm`、中心保持、指定位置保持、随底盘阶段切换的任务管理；
 - 每周期 CSV（含预测位置序列）、离线重放和误差/饱和/求解耗时统计。
 
@@ -76,6 +77,8 @@ python3 tools/analyze_log.py logs/smoke.csv
 同时运行的发送器；首次接入一个保留了旧命令历史的DMMC时，用
 `--start-command-id LAST_ID_PLUS_ONE`指定安全起点，该参数只对新建或空文件生效。
 工具在串口写入结果不确定时直接退出，不会重发同一个`command_id`。
+串口打开使用独占模式；正式控制程序与本工具不能同时占用同一串口，也不能同时
+锁定同一个序列文件。
 
 无硬件检查三帧的完整字节：
 
@@ -91,7 +94,8 @@ python3 tools/analyze_log.py logs/smoke.csv
 ```bash
 ./nx_control/build/ball_nx_control \
   --config nx_control/config/nx-control.conf \
-  --dmmc /dev/ttyACM0 --task auto --log nx_control/logs/live.csv
+  --dmmc /dev/ttyACM0 --task auto --log nx_control/logs/live.csv \
+  --state-file nx_control/state/tube-control-v3.seq
 
 python3 run.py --no-serial --protocol tube-v3 \
   --control-udp 127.0.0.1:29001
@@ -117,6 +121,17 @@ python3 run.py --no-serial --protocol tube-v3 \
 - `--key-start`：在前台终端等待键盘，按`d`立即开始或从头重启一次任务，无需
   回车；该模式不响应底盘启动事件。Task3等待期持续以0°
   `HOLD`保持横梁，不关闭电机。
+
+SAFE/Fault一旦发送即在NX侧锁存，视觉恢复不会自动回到TRACK；只能由操作员再次
+按`d`重启任务。按键后的第一条非安全命令使用HOLD或TRACK并精确发送
+`flags=0x03`（ENABLE + CLEAR_COMM_WARNING），后续正常帧恢复`0x01`。
+bit1只是通信状态恢复标志，不是Ozone解锁码。
+
+正式程序也使用预留号段并同步落盘的`command_id`序列文件，默认路径为
+`state/tube-control-v3.seq`。可用`--state-file`和仅对新文件生效的
+`--start-command-id`覆盖。串口写入结果不确定时该ID会被跳过，后续帧绝不重发
+旧ID。正式程序和`tube_hold_sender`应使用各自的序列文件；切换发送者前必须先
+停止当前进程。
 
 只有明确的`--task 3`静止任务允许在缺少新鲜`chassis-state-v1`时按底盘加速度
 为0继续运行。其他所有任务（包括旧`--task static`）仍要求底盘状态新鲜且无故障。
@@ -163,7 +178,9 @@ python3 tools/analyze_log.py replay-output.csv --json replay-metrics.json
 
 正式测试应同时保留视觉侧 `--position-csv`、控制CSV和视频。控制日志中的
 `vision_age_ms`、`mpc_ms`、`prediction_m`、实际管道角、底盘阶段和故障字段足以
-复现观测与控制决策。
+复现观测与控制决策。日志还直接记录`wire_control_state`、`wire_flags`、
+`dmmc_controller_state`、`safety_latched`、`safety_event_id`和
+`last_stop_reason`；安全锁存/解除行会立即flush，不依赖每秒一次的终端摘要。
 
 ## 上车前必须实测的参数
 

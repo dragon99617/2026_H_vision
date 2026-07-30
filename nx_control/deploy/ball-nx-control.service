@@ -5,7 +5,7 @@ After=dev-ttyACM0.device
 [Service]
 Type=simple
 WorkingDirectory=/home/nx/ball_yolo26s_nx/nx_control
-ExecStart=/home/nx/ball_yolo26s_nx/nx_control/build/ball_nx_control --config config/nx-control.conf --dmmc /dev/ttyACM0 --task auto --log logs/live.csv
+ExecStart=/home/nx/ball_yolo26s_nx/nx_control/build/ball_nx_control --config config/nx-control.conf --dmmc /dev/ttyACM0 --task auto --log logs/live.csv --state-file state/tube-control-v3.seq
 Restart=on-failure
 RestartSec=1
 User=nx

@@ -49,7 +49,9 @@ std::uint16_t rad_to_ucdeg(double value) {
                  static_cast<long>(std::numeric_limits<std::uint16_t>::max())));
 }
 
-std::uint8_t mc02_control_state(TaskState state) {
+}  // namespace
+
+std::uint8_t control_state_to_mc02(TaskState state) {
   switch (state) {
     case TaskState::Idle:
       return 0U;
@@ -69,8 +71,6 @@ std::uint8_t mc02_control_state(TaskState state) {
       return 4U;
   }
 }
-
-}  // namespace
 
 std::uint16_t crc16_ccitt_false(const std::uint8_t* data, std::size_t size) {
   std::uint16_t crc = 0xFFFFU;
@@ -288,7 +288,7 @@ std::vector<std::uint8_t> encode_control_command(const ControlCommand& command) 
   wire.theta_cmd_cdeg = rad_to_cdeg(command.theta_cmd_rad);
   wire.theta_rate_limit_cdeg_s = rad_to_ucdeg(command.theta_rate_limit_rad_s);
   wire.ttl_ms = command.ttl_ms;
-  wire.control_state = mc02_control_state(command.control_state);
+  wire.control_state = control_state_to_mc02(command.control_state);
   wire.flags = command.flags;
   return encode_tube_control_v3(wire);
 }

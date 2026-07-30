@@ -7,6 +7,8 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <string>
 
 namespace nx_control {
 
@@ -21,7 +23,8 @@ class NxController {
   void ingest_vision(VisionMeasurement measurement);
   void ingest_tube_status(const TubeStatus& status);
   void ingest_chassis_state(const ChassisState& state);
-  ControlOutput tick(double now_s);
+  ControlOutput tick(double now_s,
+                     std::optional<std::uint32_t> command_id = std::nullopt);
   void reset(double now_s);
 
   const DelayedKalmanObserver& observer() const { return observer_; }
@@ -32,6 +35,11 @@ class NxController {
   double rate_limit_and_clamp(double requested_u);
   double fallback_command(const ObserverState& estimate, const ReferencePoint& reference,
                           double feedforward) const;
+  bool hold_prediction_crosses_soft_boundary(const ObserverState& estimate,
+                                             double actuator_u_m_s2,
+                                             double chassis_acceleration_m_s2,
+                                             double horizon_s) const;
+  void latch_safety(const std::string& reason, bool fault);
 
   ControlConfig config_;
   DelayedKalmanObserver observer_;
@@ -59,6 +67,11 @@ class NxController {
   double previous_command_u_ = 0.0;
   int solver_failures_ = 0;
   double first_solver_failure_s_ = -1.0;
+  bool safety_latched_ = false;
+  bool safety_fault_latched_ = false;
+  bool clear_comm_warning_pending_ = false;
+  std::uint64_t safety_event_id_ = 0;
+  std::string last_stop_reason_;
 };
 
 }  // namespace nx_control

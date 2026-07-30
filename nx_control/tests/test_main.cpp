@@ -1,4 +1,5 @@
 #include "nx_control/controller.hpp"
+#include "nx_control/io.hpp"
 #include "nx_control/mpc.hpp"
 #include "nx_control/observer.hpp"
 #include "nx_control/protocol.hpp"
@@ -12,6 +13,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <unistd.h>
 
 namespace {
 
@@ -333,6 +335,35 @@ void test_remote_clock_sync() {
         "remote clock reset handles MCU reboot");
 }
 
+void test_persistent_sequence() {
+  char path[] = "/tmp/nx-control-sequence-XXXXXX";
+  const int temporary_fd = ::mkstemp(path);
+  check(temporary_fd >= 0, "create temporary sequence file");
+  if (temporary_fd < 0) return;
+  ::close(temporary_fd);
+
+  {
+    nx_control::PersistentSequence sequence(path, 42U);
+    sequence.prepare();
+    check(sequence.next() == 42U && sequence.next() == 43U,
+          "persistent sequence starts at the configured ID and increments");
+    bool rejected_second_owner = false;
+    try {
+      nx_control::PersistentSequence duplicate(path, 1U);
+    } catch (const std::exception&) {
+      rejected_second_owner = true;
+    }
+    check(rejected_second_owner, "persistent sequence rejects a concurrent sender");
+    sequence.checkpoint();
+  }
+  {
+    nx_control::PersistentSequence sequence(path, 1U);
+    check(sequence.next() == 44U,
+          "persistent sequence resumes after the last consumed ID");
+  }
+  ::unlink(path);
+}
+
 void test_mpc_constraints() {
   nx_control::ControlConfig config;
   check(std::abs(config.theta_limit_rad -
@@ -489,27 +520,180 @@ void test_controller_safety() {
   nx_control::NxController controller(config, std::make_unique<ZeroSolver>());
   controller.reset(10.0);
   controller.configure_task(nx_control::TaskMode::HoldCenter, 0.0, true);
-  nx_control::TubeStatus tube;
-  tube.receive_time_s = 10.0;
-  nx_control::ChassisState chassis;
-  chassis.receive_time_s = 10.0;
-  chassis.ttl_ms = 100;
-  nx_control::VisionMeasurement vision;
-  vision.status = nx_control::VisionStatus::Measured;
-  vision.ball_confidence = vision.tube_confidence = 1.0;
-  vision.receive_time_s = 10.0;
-  vision.capture_time_ms = 10000;
-  vision.has_capture_time = true;
-  controller.ingest_tube_status(tube);
-  controller.ingest_chassis_state(chassis);
-  controller.ingest_vision(vision);
-  vision.position_m = 0.12;
-  controller.ingest_vision(vision);  // duplicate frame must not trip the raw safety boundary
+
+  auto ingest_feedback = [&](std::uint32_t sequence, double now_s) {
+    nx_control::TubeStatus tube;
+    tube.sequence = sequence;
+    tube.dmmc_time_ms = static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
+    tube.receive_time_s = now_s;
+    controller.ingest_tube_status(tube);
+    nx_control::ChassisState chassis;
+    chassis.sequence = sequence;
+    chassis.chassis_time_ms =
+        static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
+    chassis.receive_time_s = now_s;
+    chassis.ttl_ms = 100;
+    controller.ingest_chassis_state(chassis);
+  };
+  auto ingest_vision = [&](std::uint32_t frame_id, double now_s,
+                           double position_m = 0.0) {
+    nx_control::VisionMeasurement vision;
+    vision.frame_id = frame_id;
+    vision.status = nx_control::VisionStatus::Measured;
+    vision.position_m = position_m;
+    vision.ball_confidence = vision.tube_confidence = 1.0;
+    vision.receive_time_s = now_s;
+    vision.capture_time_ms =
+        static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
+    vision.has_capture_time = true;
+    controller.ingest_vision(vision);
+  };
+
+  ingest_feedback(1U, 10.0);
+  ingest_vision(1U, 10.0);
   auto output = controller.tick(10.02);
   check(!output.request_stop, "healthy controller does not request stop");
-  output = controller.tick(10.20);
-  check(output.request_stop && (output.command.flags & 0x08U) != 0U,
-        "stale vision/chassis requests stop");
+
+  ingest_feedback(2U, 10.15);
+  output = controller.tick(10.15);
+  check(!output.request_stop && !output.safety_latched &&
+            output.command.control_state == nx_control::TaskState::StandbyHold &&
+            std::abs(output.command.theta_cmd_rad) < 1e-12 &&
+            output.command.flags == 0x01U &&
+            nx_control::protocol::control_state_to_mc02(output.command.control_state) == 1U,
+        "100-250 ms vision loss emits enabled zero-degree HOLD without SAFE");
+
+  ingest_feedback(3U, 10.16);
+  ingest_vision(2U, 10.16);
+  output = controller.tick(10.16);
+  check(!output.request_stop && !output.safety_latched &&
+            output.command.control_state == nx_control::TaskState::HoldCenter,
+        "vision recovery during soft HOLD resumes tracking");
+
+  ingest_feedback(4U, 10.42);
+  output = controller.tick(10.42);
+  check(output.request_stop && output.safety_latched &&
+            output.safety_event_id == 1U &&
+            output.command.control_state == nx_control::TaskState::Safe &&
+            (output.command.flags & 0x08U) != 0U &&
+            output.last_stop_reason == "vision_stale",
+        "vision loss beyond 250 ms enters latched SAFE");
+
+  ingest_feedback(5U, 10.43);
+  ingest_vision(3U, 10.43);
+  output = controller.tick(10.43);
+  check(output.safety_latched &&
+            output.command.control_state == nx_control::TaskState::Safe,
+        "fresh vision cannot automatically clear latched SAFE");
+
+  controller.start_task(10.44);
+  ingest_feedback(6U, 10.44);
+  ingest_vision(4U, 10.44);
+  output = controller.tick(10.44, 900U);
+  check(!output.safety_latched &&
+            output.command.control_state == nx_control::TaskState::HoldCenter &&
+            output.command.flags == 0x03U &&
+            output.command.command_id == 900U,
+        "operator restart clears SAFE and sends TRACK with flags=0x03");
+
+  ingest_feedback(7U, 10.46);
+  ingest_vision(5U, 10.46);
+  output = controller.tick(10.46, 901U);
+  check(output.command.flags == 0x01U && output.command.command_id == 901U,
+        "frames after operator restart return to flags=0x01 and preserve supplied IDs");
+
+  nx_control::ControlConfig boundary_config = config;
+  boundary_config.innovation_gate_sigma = 20.0;
+  nx_control::NxController boundary_controller(
+      boundary_config, std::make_unique<ZeroSolver>());
+  boundary_controller.reset(20.0);
+  boundary_controller.configure_task(nx_control::TaskMode::HoldCenter, 0.0, true);
+  nx_control::TubeStatus tube;
+  tube.sequence = 1U;
+  tube.dmmc_time_ms = 20000U;
+  tube.receive_time_s = 20.0;
+  boundary_controller.ingest_tube_status(tube);
+  nx_control::ChassisState chassis;
+  chassis.sequence = 1U;
+  chassis.chassis_time_ms = 20000U;
+  chassis.receive_time_s = 20.0;
+  chassis.ttl_ms = 100U;
+  boundary_controller.ingest_chassis_state(chassis);
+  nx_control::VisionMeasurement vision;
+  vision.frame_id = 1U;
+  vision.status = nx_control::VisionStatus::Measured;
+  vision.position_m = boundary_config.position_soft_limit_m + 0.001;
+  vision.ball_confidence = vision.tube_confidence = 1.0;
+  vision.capture_time_ms = 20000U;
+  vision.has_capture_time = true;
+  vision.receive_time_s = 20.0;
+  boundary_controller.ingest_vision(vision);
+  boundary_controller.tick(20.0);
+  tube.sequence = 2U;
+  tube.dmmc_time_ms = 20150U;
+  tube.receive_time_s = 20.15;
+  boundary_controller.ingest_tube_status(tube);
+  chassis.sequence = 2U;
+  chassis.chassis_time_ms = 20150U;
+  chassis.receive_time_s = 20.15;
+  boundary_controller.ingest_chassis_state(chassis);
+  output = boundary_controller.tick(20.15);
+  check(output.safety_latched &&
+            output.last_stop_reason == "vision_lost_outside_soft_boundary",
+        "soft-boundary crossing during vision loss enters SAFE immediately");
+
+  nx_control::ControlConfig prediction_config = config;
+  prediction_config.innovation_gate_sigma = 1000.0;
+  prediction_config.measurement_sigma_m = 1e-6;
+  nx_control::NxController prediction_controller(
+      prediction_config, std::make_unique<ZeroSolver>());
+  prediction_controller.reset(30.0);
+  prediction_controller.configure_task(nx_control::TaskMode::HoldCenter, 0.0, true);
+  auto ingest_prediction_sample = [&](std::uint32_t sequence, double now_s,
+                                      double position_m) {
+    nx_control::TubeStatus prediction_tube;
+    prediction_tube.sequence = sequence;
+    prediction_tube.dmmc_time_ms =
+        static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
+    prediction_tube.receive_time_s = now_s;
+    prediction_controller.ingest_tube_status(prediction_tube);
+    nx_control::ChassisState prediction_chassis;
+    prediction_chassis.sequence = sequence;
+    prediction_chassis.chassis_time_ms =
+        static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
+    prediction_chassis.receive_time_s = now_s;
+    prediction_chassis.ttl_ms = 100U;
+    prediction_controller.ingest_chassis_state(prediction_chassis);
+    nx_control::VisionMeasurement prediction_vision;
+    prediction_vision.frame_id = sequence;
+    prediction_vision.status = nx_control::VisionStatus::Measured;
+    prediction_vision.position_m = position_m;
+    prediction_vision.ball_confidence = prediction_vision.tube_confidence = 1.0;
+    prediction_vision.capture_time_ms =
+        static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
+    prediction_vision.has_capture_time = true;
+    prediction_vision.receive_time_s = now_s;
+    prediction_controller.ingest_vision(prediction_vision);
+  };
+  ingest_prediction_sample(1U, 30.0, 0.1000);
+  prediction_controller.tick(30.0);
+  ingest_prediction_sample(2U, 30.02, 0.1004);
+  prediction_controller.tick(30.02);
+  nx_control::TubeStatus prediction_tube;
+  prediction_tube.sequence = 3U;
+  prediction_tube.dmmc_time_ms = 30130U;
+  prediction_tube.receive_time_s = 30.13;
+  prediction_controller.ingest_tube_status(prediction_tube);
+  nx_control::ChassisState prediction_chassis;
+  prediction_chassis.sequence = 3U;
+  prediction_chassis.chassis_time_ms = 30130U;
+  prediction_chassis.receive_time_s = 30.13;
+  prediction_chassis.ttl_ms = 100U;
+  prediction_controller.ingest_chassis_state(prediction_chassis);
+  output = prediction_controller.tick(30.13);
+  check(output.safety_latched &&
+            output.last_stop_reason == "vision_lost_predicted_soft_boundary",
+        "predicted soft-boundary crossing during vision loss enters SAFE immediately");
 }
 
 void test_controller_angle_limit() {
@@ -717,6 +901,7 @@ int main() {
   test_protocol();
   test_delayed_observer();
   test_remote_clock_sync();
+  test_persistent_sequence();
   test_mpc_constraints();
   test_mpc_actuator_delay();
   test_task_manager();
