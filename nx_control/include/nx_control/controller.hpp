@@ -7,6 +7,7 @@
 #include "nx_control/types.hpp"
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -65,6 +66,8 @@ class NxController {
   bool have_chassis_sequence_ = false;
   bool v2_clock_initialized_ = false;
   double v2_capture_time_s_ = 0.0;
+  double latest_vision_capture_age_ms_ =
+      std::numeric_limits<double>::infinity();
   double latest_visual_position_m_ = 0.0;
   bool latest_visual_position_valid_ = false;
   std::uint32_t command_id_ = 0;

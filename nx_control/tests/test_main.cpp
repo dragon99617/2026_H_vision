@@ -624,6 +624,7 @@ void test_task3_friction_compensator() {
       3.14159265358979323846 / 180.0;
   nx_control::ControlConfig config;
   config.task3_friction_blend_time_s = 0.04;
+  config.task3_friction_breakaway_timeout_s = 0.60;
   nx_control::Task3FrictionCompensator friction(config);
 
   nx_control::FrictionCompensation result;
@@ -654,8 +655,33 @@ void test_task3_friction_compensator() {
             result.direction == 1,
         "friction direction follows positive MPC braking acceleration");
 
+  friction.reset();
+  result = friction.update(1.40, true, -0.008, 0.0, 0.020, 0.0);
+  check(result.mode == nx_control::FrictionMode::BreakawayNegative &&
+            result.direction == -1,
+        "stationary overshoot follows position error instead of stale MPC direction");
+
+  friction.reset();
+  result = friction.update(1.50, true, 0.003, 0.090, 0.020, 0.0);
+  check(result.mode == nx_control::FrictionMode::RollingNegative &&
+            result.direction == -1,
+        "stopping-distance guard starts braking before a fast target crossing");
+
+  friction.reset();
+  config.task3_friction_breakaway_timeout_s = 0.10;
+  nx_control::Task3FrictionCompensator limited_friction(config);
+  for (int step = 0; step < 30; ++step) {
+    result = limited_friction.update(1.60 + step * config.period_s, true,
+                                     0.04, 0.0, 0.010, 0.0);
+  }
+  check(result.mode == nx_control::FrictionMode::RollingPositive &&
+            result.theta_friction_rad <
+                config.task3_theta_static_rad +
+                    config.task3_theta_margin_rad,
+        "stationary breakaway pulse falls back to rolling compensation after timeout");
+
   for (int step = 0; step < 40; ++step) {
-    result = friction.update(1.32 + step * config.period_s, true, 0.001,
+    result = friction.update(2.20 + step * config.period_s, true, 0.001,
                              0.004, 0.0, 0.0);
   }
   check(result.mode == nx_control::FrictionMode::Hold &&
@@ -1079,6 +1105,7 @@ void test_controller_task3_friction_and_protocol() {
   double feedback_theta_rad = 0.0;
   double previous_theta_rad = 0.0;
   bool rate_limit_ok = true;
+  bool saw_positive_breakaway = false;
   for (std::uint32_t sequence = 1; sequence <= 40; ++sequence) {
     const double now_s = 100.0 + sequence * config.period_s;
     const auto now_ms =
@@ -1108,15 +1135,21 @@ void test_controller_task3_friction_and_protocol() {
         std::abs(output.command.theta_cmd_rad) <= config.theta_limit_rad + 1e-12;
     previous_theta_rad = output.command.theta_cmd_rad;
     feedback_theta_rad = output.command.theta_cmd_rad;
+    saw_positive_breakaway =
+        saw_positive_breakaway ||
+        (output.friction_mode ==
+             nx_control::FrictionMode::BreakawayPositive &&
+         output.friction_direction == 1 &&
+         output.command.theta_cmd_rad > 0.4 * kDegrees);
   }
   check(rate_limit_ok,
         "Task 3 total bias/friction/MPC angle respects 4 degree and 2 degree/s limits");
-  check(output.friction_mode ==
-                nx_control::FrictionMode::BreakawayPositive &&
+  check(saw_positive_breakaway &&
+            output.friction_mode ==
+                nx_control::FrictionMode::RollingPositive &&
             output.friction_direction == 1 &&
-            output.command.theta_cmd_rad > 0.4 * kDegrees &&
             std::abs(output.theta_bias_rad + 0.15 * kDegrees) < 1e-12,
-        "NX Task 3 command applies measured bias and positive breakaway compensation");
+        "NX Task 3 bounds positive breakaway then falls back to rolling compensation");
   check(output.command.command_id == 1040U &&
             output.command.source_frame_id == 40U &&
             output.command.ttl_ms == 60U &&
@@ -1216,6 +1249,7 @@ void test_csv_task3_diagnostics() {
     output.settle_elapsed_ms = 250.0;
     output.friction_mode = nx_control::FrictionMode::RollingNegative;
     output.friction_direction = -1;
+    output.vision_capture_age_ms = 34.5;
     nx_control::TubeStatus tube;
     tube.theta_actual_rad = -0.01;
     logger.write(1.0, output, &tube, nullptr);
@@ -1226,12 +1260,13 @@ void test_csv_task3_diagnostics() {
   std::string row;
   std::getline(stream, header);
   std::getline(stream, row);
-  const std::array<const char*, 15> required_fields{
+  const std::array<const char*, 16> required_fields{
       "task3_stage",       "planned_x_m",       "planned_v_m_s",
       "planned_a_m_s2",    "settle_position_ok", "settle_velocity_ok",
       "settle_theta_ok",    "settle_elapsed_ms", "theta_mpc_deg",
       "theta_bias_deg",     "theta_friction_deg", "theta_command_deg",
-      "friction_mode",      "friction_direction", "theta_actual_deg"};
+      "friction_mode",      "friction_direction", "theta_actual_deg",
+      "vision_capture_age_ms"};
   bool fields_present = true;
   for (const char* field : required_fields) {
     fields_present = fields_present &&

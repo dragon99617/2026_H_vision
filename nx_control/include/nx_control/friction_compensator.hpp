@@ -18,10 +18,11 @@ class Task3FrictionCompensator {
   FrictionCompensation update(double now_s, bool active, double position_error_m,
                               double velocity_m_s, double requested_u_m_s2,
                               double reference_velocity_m_s);
-  void reset();
+ void reset();
 
  private:
-  int requested_direction(double position_error_m, double requested_u_m_s2,
+  int requested_direction(double position_error_m, double velocity_m_s,
+                          double requested_u_m_s2,
                           double reference_velocity_m_s) const;
 
   ControlConfig config_;
@@ -29,6 +30,9 @@ class Task3FrictionCompensator {
   int direction_ = 0;
   double theta_friction_rad_ = 0.0;
   double last_update_s_ = -1.0;
+  double breakaway_started_s_ = -1.0;
+  int breakaway_direction_ = 0;
+  bool breakaway_limited_ = false;
 };
 
 const char* friction_mode_name(FrictionMode mode);

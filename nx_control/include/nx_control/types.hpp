@@ -172,6 +172,7 @@ struct ControlOutput {
   int friction_direction = 0;
   double acceleration_used_m_s2 = 0.0;
   double vision_age_ms = std::numeric_limits<double>::infinity();
+  double vision_capture_age_ms = std::numeric_limits<double>::infinity();
   double chassis_age_ms = std::numeric_limits<double>::infinity();
   double dmmc_age_ms = std::numeric_limits<double>::infinity();
   double mpc_solve_ms = 0.0;
@@ -224,6 +225,8 @@ struct ControlConfig {
   double task3_rolling_compensation_rad =
       0.30 * 3.14159265358979323846 / 180.0;
   double task3_friction_blend_time_s = 0.20;
+  double task3_friction_breakaway_timeout_s = 0.75;
+  double task3_braking_deceleration_m_s2 = 0.080;
   double task3_friction_rolling_enter_velocity_m_s = 0.010;
   double task3_friction_stationary_enter_velocity_m_s = 0.005;
   double task3_friction_disable_position_error_m = 0.0025;

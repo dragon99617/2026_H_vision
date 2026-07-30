@@ -13,20 +13,46 @@ void Task3FrictionCompensator::reset() {
   direction_ = 0;
   theta_friction_rad_ = 0.0;
   last_update_s_ = -1.0;
+  breakaway_started_s_ = -1.0;
+  breakaway_direction_ = 0;
+  breakaway_limited_ = false;
 }
 
 int Task3FrictionCompensator::requested_direction(
-    double position_error_m, double requested_u_m_s2,
+    double position_error_m, double velocity_m_s, double requested_u_m_s2,
     double reference_velocity_m_s) const {
+  const double abs_error = std::abs(position_error_m);
+  const double abs_velocity = std::abs(velocity_m_s);
+  const bool outside_position_deadband =
+      abs_error >= config_.task3_friction_disable_position_error_m;
+
+  if (outside_position_deadband &&
+      abs_velocity > config_.task3_friction_disable_velocity_m_s) {
+    const bool moving_toward_target = position_error_m * velocity_m_s > 0.0;
+    const double stopping_distance_m =
+        velocity_m_s * velocity_m_s /
+        (2.0 * config_.task3_braking_deceleration_m_s2);
+    if (!moving_toward_target || stopping_distance_m >= abs_error) {
+      return velocity_m_s > 0.0 ? -1 : 1;
+    }
+  }
+
+  if (std::abs(reference_velocity_m_s) >= 1e-4) {
+    return reference_velocity_m_s > 0.0 ? 1 : -1;
+  }
+
+  if (outside_position_deadband &&
+      abs_velocity <=
+          config_.task3_friction_stationary_enter_velocity_m_s) {
+    return position_error_m > 0.0 ? 1 : -1;
+  }
+
   if (std::abs(requested_u_m_s2) >=
       config_.task3_friction_request_acceleration_m_s2) {
     return requested_u_m_s2 > 0.0 ? 1 : -1;
   }
-  if (std::abs(reference_velocity_m_s) >= 1e-4) {
-    return reference_velocity_m_s > 0.0 ? 1 : -1;
-  }
-  if (std::abs(position_error_m) >=
-      config_.task3_friction_disable_position_error_m) {
+
+  if (outside_position_deadband) {
     return position_error_m > 0.0 ? 1 : -1;
   }
   return 0;
@@ -54,11 +80,21 @@ FrictionCompensation Task3FrictionCompensator::update(
   if (target_deadband) {
     mode_ = FrictionMode::Hold;
     direction_ = 0;
+    breakaway_started_s_ = -1.0;
+    breakaway_direction_ = 0;
+    breakaway_limited_ = false;
   } else {
     const int request =
-        requested_direction(position_error_m, requested_u_m_s2,
+        requested_direction(position_error_m, velocity_m_s, requested_u_m_s2,
                             reference_velocity_m_s);
-    if (request != 0) direction_ = request;
+    if (request != 0 && request != direction_) {
+      direction_ = request;
+      breakaway_started_s_ = -1.0;
+      breakaway_direction_ = request;
+      breakaway_limited_ = false;
+    } else if (request != 0) {
+      direction_ = request;
+    }
 
     bool rolling = mode_ == FrictionMode::RollingPositive ||
                    mode_ == FrictionMode::RollingNegative;
@@ -78,11 +114,28 @@ FrictionCompensation Task3FrictionCompensator::update(
       target_friction_rad =
           direction_ * config_.task3_rolling_compensation_rad;
     } else {
-      mode_ = direction_ > 0 ? FrictionMode::BreakawayPositive
-                             : FrictionMode::BreakawayNegative;
-      target_friction_rad =
-          direction_ *
-          (config_.task3_theta_static_rad + config_.task3_theta_margin_rad);
+      if (breakaway_direction_ != direction_) {
+        breakaway_direction_ = direction_;
+        breakaway_started_s_ = -1.0;
+        breakaway_limited_ = false;
+      }
+      if (breakaway_started_s_ < 0.0) breakaway_started_s_ = now_s;
+      if (now_s - breakaway_started_s_ >=
+          config_.task3_friction_breakaway_timeout_s) {
+        breakaway_limited_ = true;
+      }
+      if (breakaway_limited_) {
+        mode_ = direction_ > 0 ? FrictionMode::RollingPositive
+                               : FrictionMode::RollingNegative;
+        target_friction_rad =
+            direction_ * config_.task3_rolling_compensation_rad;
+      } else {
+        mode_ = direction_ > 0 ? FrictionMode::BreakawayPositive
+                               : FrictionMode::BreakawayNegative;
+        target_friction_rad =
+            direction_ *
+            (config_.task3_theta_static_rad + config_.task3_theta_margin_rad);
+      }
     }
   }
 

@@ -52,6 +52,7 @@ void NxController::reset(double now_s) {
   dmmc_clock_.reset();
   chassis_clock_.reset();
   v2_clock_initialized_ = false;
+  latest_vision_capture_age_ms_ = std::numeric_limits<double>::infinity();
   latest_visual_position_valid_ = false;
   previous_mpc_u_ = 0.0;
   previous_theta_command_rad_ = 0.0;
@@ -97,6 +98,9 @@ void NxController::ingest_vision(VisionMeasurement measurement) {
   }
   // Vision and controller use CLOCK_MONOTONIC. Propagate to an inter-tick exposure time.
   measurement.capture_time_s = std::min(measurement.capture_time_s, measurement.receive_time_s);
+  latest_vision_capture_age_ms_ =
+      1000.0 *
+      std::max(0.0, measurement.receive_time_s - measurement.capture_time_s);
   if (measurement.capture_time_s > observer_.time_s()) {
     const double actual_u =
         have_tube_status_
@@ -251,6 +255,7 @@ ControlOutput NxController::tick(double now_s,
   output.vision_age_ms = last_accepted_vision_s_ >= 0.0
                              ? 1000.0 * std::max(0.0, now_s - last_accepted_vision_s_)
                              : std::numeric_limits<double>::infinity();
+  output.vision_capture_age_ms = latest_vision_capture_age_ms_;
   output.chassis_age_ms = 1000.0 * chassis_sync_.age_s(now_s);
   output.dmmc_age_ms = have_tube_status_
                            ? 1000.0 * std::max(0.0, now_s - tube_status_.receive_time_s)

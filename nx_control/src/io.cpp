@@ -219,6 +219,10 @@ ControlConfig load_config(const std::string& path) {
          config.task3_rolling_compensation_rad);
   number("task3_friction_blend_time_s",
          config.task3_friction_blend_time_s);
+  number("task3_friction_breakaway_timeout_s",
+         config.task3_friction_breakaway_timeout_s);
+  number("task3_braking_deceleration_m_s2",
+         config.task3_braking_deceleration_m_s2);
   number("task3_friction_rolling_enter_velocity_m_s",
          config.task3_friction_rolling_enter_velocity_m_s);
   number("task3_friction_stationary_enter_velocity_m_s",
@@ -285,6 +289,8 @@ ControlConfig load_config(const std::string& path) {
         config.task3_theta_margin_rad >= 0.0 &&
         config.task3_rolling_compensation_rad >= 0.0 &&
         config.task3_friction_blend_time_s > 0.0 &&
+        config.task3_friction_breakaway_timeout_s > 0.0 &&
+        config.task3_braking_deceleration_m_s2 > 0.0 &&
         config.task3_friction_stationary_enter_velocity_m_s >= 0.0 &&
         config.task3_friction_rolling_enter_velocity_m_s >
             config.task3_friction_stationary_enter_velocity_m_s &&
@@ -421,7 +427,7 @@ bool CsvLogger::open(const std::string& path) {
              "x_m,v_m_s,d_m_s2,x_ref_m,u_cmd_m_s2,"
              "theta_cmd_rad,theta_actual_rad,motor_position_rad,motor_velocity_rad_s,"
              "motor_torque_nm,a_actual_m_s2,a_ref_m_s2,v_actual_m_s,v_ref_m_s,jerk_ref_m_s3,"
-             "track_error_m,track_quality,chassis_events,vision_age_ms,"
+             "track_error_m,track_quality,chassis_events,vision_age_ms,vision_capture_age_ms,"
              "chassis_age_ms,dmmc_age_ms,mpc_ms,qp_build_ms,qp_setup_ms,qp_update_ms,"
              "qp_backend_solve_ms,qp_iteration_us,solver_iterations,slack_m,solver_failures,"
              "fallback,slow,stop,tube_faults,motion_phase,track_segment,reason,prediction_m\n";
@@ -470,6 +476,7 @@ void CsvLogger::write(double now_s, const ControlOutput& output, const TubeStatu
           << (chassis ? chassis->track_error_m : 0.0) << ','
           << (chassis ? chassis->track_quality : 0.0) << ','
           << (chassis ? chassis->events : 0) << ',' << output.vision_age_ms
+          << ',' << output.vision_capture_age_ms
           << ',' << output.chassis_age_ms << ',' << output.dmmc_age_ms << ','
           << output.mpc_solve_ms << ',' << output.qp_build_ms << ','
           << output.qp_setup_ms << ','
