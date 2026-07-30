@@ -201,8 +201,8 @@ struct ControlConfig {
   double fallback_disturbance_gain = 0.5;
   bool require_osqp = false;
   int qp_max_iterations = 250;
-  double qp_eps_abs = 1e-4;
-  double qp_eps_rel = 1e-4;
+  double qp_eps_abs = 1e-3;
+  double qp_eps_rel = 1e-3;
 };
 
 }  // namespace nx_control

@@ -22,7 +22,8 @@ DMMC 管道实际角和底盘状态，输出 `tube-control-v3`，不控制车轮
 
 ## 构建和测试
 
-本机无OSQP时可先验证全部逻辑：
+项目内已提供为当前 Jetson NX（ARM64）编译的 OSQP 0.6.3 静态库；默认构建会直接
+启用它，不需要安装系统动态库：
 
 ```bash
 cd /home/d/2026ti/2026H/ball_yolo26s_nx/nx_control
@@ -31,17 +32,17 @@ cmake --build build -j2
 cd build && ctest --output-on-failure
 ```
 
-比赛部署必须安装 OSQP 0.6.x 的头文件和共享库，并明确启用、强制检查：
+配置中的 `require_osqp=true` 会让误用非 OSQP 版本的程序在启动时直接报错；正常
+启动还会打印 `MPC backend: osqp (required)`。若只为移植或回归测试而明确需要
+稠密 ADMM 后端，可使用：
 
 ```bash
-cmake -S . -B build-osqp -DCMAKE_BUILD_TYPE=Release \
-  -DNX_CONTROL_USE_OSQP=ON
-cmake --build build-osqp -j2
-sed -i 's/require_osqp=false/require_osqp=true/' config/nx-control.conf
+cmake -S . -B build-dense -DNX_CONTROL_USE_OSQP=OFF
 ```
 
-若系统找不到OSQP，可另外传入 `-DOSQP_INCLUDE_DIR=... -DOSQP_LIBRARY=...`。
-项目按OSQP 0.6.x C API编译；不要在未完成API适配时直接替换成1.x。
+在其他架构上可将自行编译的 OSQP 0.6.x 安装前缀通过
+`-DNX_CONTROL_OSQP_ROOT=...` 传入。项目按 OSQP 0.6.x C API 编译；不要在未完成
+API 适配时直接替换成 1.x。
 
 无硬件烟测：
 
@@ -170,8 +171,8 @@ python3 tools/analyze_log.py replay-output.csv --json replay-metrics.json
 `rolling_lambda`，底盘加速度正方向和滤波时常。随后按空载角度、小球静止、
 静态移动、低速直线、AB段、低速整圈、30秒整圈的顺序放开测试。
 
-当前代码已通过软件构建和仿真单测；相机、DMMC、底盘实机接口及OSQP在本工作区
-没有可用硬件/库，不能用软件测试结果代替真机验收。
+当前代码已通过 OSQP 0.6.3 软件构建、单测和离线重放；相机、DMMC及底盘实机接口
+仍需按上述顺序验收，不能用软件测试结果代替真机验收。
 
 NX的摆杆命令硬限幅为`±0.5°`，角速度限制为`5°/s`，与DMMC02/STM32的
 `hard_angle_limit_deg=0.5°`一致。修改STM32限幅时必须同步修改

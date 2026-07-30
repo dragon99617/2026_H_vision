@@ -26,6 +26,7 @@ class NxController {
 
   const DelayedKalmanObserver& observer() const { return observer_; }
   const TaskManager& task_manager() const { return task_manager_; }
+  const char* mpc_backend_name() const { return mpc_.backend_name(); }
 
  private:
   double rate_limit_and_clamp(double requested_u);

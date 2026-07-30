@@ -332,7 +332,10 @@ void test_mpc_constraints() {
   std::vector<nx_control::ReferencePoint> reference(12);
   std::vector<double> acceleration(12, 0.3);
   const auto result = mpc.solve({0.03, 0.0, 0.0, 0.0}, 0.0, reference, acceleration);
-  check(result.solved, "dense MPC solves nominal QP");
+#ifdef NX_CONTROL_HAS_OSQP
+  check(result.backend == "osqp", "production build selects the OSQP backend");
+#endif
+  check(result.solved, "MPC solves nominal QP");
   if (result.solved) {
     const double u_limit = nx_control::kGravity * std::tan(config.theta_limit_rad) + 1e-5;
     const double du_limit = nx_control::kGravity *

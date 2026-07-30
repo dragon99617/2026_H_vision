@@ -159,6 +159,8 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, signal_handler);
     const nx_control::ControlConfig config = nx_control::load_config(options.config);
     nx_control::NxController controller(config);
+    std::cerr << "MPC backend: " << controller.mpc_backend_name()
+              << (config.require_osqp ? " (required)" : "") << '\n';
     const double started = nx_control::monotonic_seconds();
     controller.reset(started);
     controller.configure_task(options.task, options.target_m, options.start_immediately,

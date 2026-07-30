@@ -107,6 +107,10 @@ class OsqpSolver final : public QpSolver {
     settings_->max_iter = config_.qp_max_iterations;
     settings_->eps_abs = config_.qp_eps_abs;
     settings_->eps_rel = config_.qp_eps_rel;
+    settings_->check_termination = 5;
+#ifdef PROFILING
+    settings_->time_limit = config_.solver_deadline_ms / 1000.0;
+#endif
     return osqp_setup(&workspace_, data_, settings_) == 0;
   }
 
