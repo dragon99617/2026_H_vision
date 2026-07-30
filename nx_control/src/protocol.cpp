@@ -42,6 +42,32 @@ std::int16_t rad_to_cdeg(double value) {
       static_cast<long>(std::numeric_limits<std::int16_t>::max())));
 }
 
+std::uint16_t rad_to_ucdeg(double value) {
+  const double scaled = value * 180.0 / 3.14159265358979323846 * 100.0;
+  return static_cast<std::uint16_t>(
+      std::clamp(std::lround(scaled), 0L,
+                 static_cast<long>(std::numeric_limits<std::uint16_t>::max())));
+}
+
+std::uint8_t mc02_control_state(TaskState state) {
+  switch (state) {
+    case TaskState::Idle:
+      return 0U;
+    case TaskState::StaticMove:
+    case TaskState::HoldCenter:
+    case TaskState::HoldTarget:
+    case TaskState::VehicleAccel:
+    case TaskState::VehicleCruise:
+    case TaskState::VehicleDecel:
+      return 2U;
+    case TaskState::Safe:
+      return 3U;
+    case TaskState::Fault:
+    default:
+      return 4U;
+  }
+}
+
 }  // namespace
 
 std::uint16_t crc16_ccitt_false(const std::uint8_t* data, std::size_t size) {
@@ -106,6 +132,55 @@ std::vector<Frame> StreamParser::feed(const std::uint8_t* data, std::size_t size
   return frames;
 }
 
+std::vector<Frame> Mc02StreamParser::feed(const std::uint8_t* data, std::size_t size) {
+  buffer_.insert(buffer_.end(), data, data + size);
+  std::vector<Frame> frames;
+  while (true) {
+    const std::array<std::uint8_t, 2> marker{0xA5, 0x5A};
+    auto magic = std::search(buffer_.begin(), buffer_.end(), marker.begin(), marker.end());
+    if (magic == buffer_.end()) {
+      const bool keep_prefix = !buffer_.empty() && buffer_.back() == marker.front();
+      discarded_bytes_ += buffer_.size() - (keep_prefix ? 1U : 0U);
+      if (keep_prefix) {
+        buffer_.erase(buffer_.begin(), buffer_.end() - 1);
+      } else {
+        buffer_.clear();
+      }
+      break;
+    }
+    if (magic != buffer_.begin()) {
+      const auto count = static_cast<std::size_t>(std::distance(buffer_.begin(), magic));
+      discarded_bytes_ += count;
+      buffer_.erase(buffer_.begin(), magic);
+    }
+    if (buffer_.size() < 4U) break;
+    const std::size_t payload_size = buffer_[3];
+    if (payload_size > 56U) {
+      ++length_errors_;
+      ++discarded_bytes_;
+      buffer_.erase(buffer_.begin());
+      continue;
+    }
+    const std::size_t frame_size = 4U + payload_size + 2U;
+    if (buffer_.size() < frame_size) break;
+    const std::uint16_t expected = static_cast<std::uint16_t>(buffer_[frame_size - 2U]) |
+                                   (static_cast<std::uint16_t>(buffer_[frame_size - 1U]) << 8U);
+    const std::uint16_t actual = crc16_ccitt_false(buffer_.data(), frame_size - 2U);
+    if (actual != expected) {
+      ++crc_errors_;
+      ++discarded_bytes_;
+      buffer_.erase(buffer_.begin());
+      continue;
+    }
+    Frame frame;
+    frame.type = buffer_[2];
+    frame.payload.assign(buffer_.begin() + 4, buffer_.begin() + 4 + payload_size);
+    frames.push_back(std::move(frame));
+    buffer_.erase(buffer_.begin(), buffer_.begin() + frame_size);
+  }
+  return frames;
+}
+
 std::optional<VisionMeasurement> decode_vision(const Frame& frame, double receive_time_s) {
   if (!((frame.type == kVisionV2 && frame.payload.size() == 11U) ||
         (frame.type == kVisionV3 && frame.payload.size() == 15U))) {
@@ -136,22 +211,23 @@ std::optional<VisionMeasurement> decode_vision(const Frame& frame, double receiv
 }
 
 std::optional<TubeStatus> decode_tube_status(const Frame& frame, double receive_time_s) {
-  if (frame.type != kTubeStatusV3 || frame.payload.size() != 32U) return std::nullopt;
+  if (frame.type != kTubeStatusV3 || frame.payload.size() != 52U) return std::nullopt;
   TubeStatus value;
   value.sequence = read_le<std::uint32_t>(frame.payload, 0);
   value.dmmc_time_ms = read_le<std::uint32_t>(frame.payload, 4);
-  value.theta_target_rad = cdeg_to_rad(read_le<std::int16_t>(frame.payload, 8));
-  value.theta_reference_rad = cdeg_to_rad(read_le<std::int16_t>(frame.payload, 10));
-  value.theta_actual_rad = cdeg_to_rad(read_le<std::int16_t>(frame.payload, 12));
-  value.motor_position_rad = static_cast<double>(read_le<std::int32_t>(frame.payload, 14)) / 1000.0;
-  value.motor_velocity_rad_s = static_cast<double>(read_le<std::int16_t>(frame.payload, 18)) / 100.0;
-  value.motor_torque_nm = static_cast<double>(read_le<std::int16_t>(frame.payload, 20)) / 1000.0;
-  value.faults = read_le<std::uint16_t>(frame.payload, 22);
-  value.can_age_ms = read_le<std::uint16_t>(frame.payload, 24);
-  value.usb_crc_errors = read_le<std::uint16_t>(frame.payload, 26);
-  value.control_age_ms = read_le<std::uint16_t>(frame.payload, 28);
-  value.state = frame.payload[30];
-  value.flags = frame.payload[31];
+  value.theta_target_rad = cdeg_to_rad(read_le<std::int16_t>(frame.payload, 12));
+  value.theta_reference_rad = cdeg_to_rad(read_le<std::int16_t>(frame.payload, 14));
+  value.theta_actual_rad = cdeg_to_rad(read_le<std::int16_t>(frame.payload, 16));
+  value.motor_position_rad = static_cast<double>(read_le<std::int32_t>(frame.payload, 18)) / 1000.0;
+  value.motor_velocity_rad_s =
+      static_cast<double>(read_le<std::int32_t>(frame.payload, 22)) / 1000.0;
+  value.motor_torque_nm = static_cast<double>(read_le<std::int16_t>(frame.payload, 26)) / 1000.0;
+  value.state = frame.payload[28];
+  value.faults = read_le<std::uint32_t>(frame.payload, 30);
+  value.can_age_ms = read_le<std::uint16_t>(frame.payload, 34);
+  value.control_age_ms = read_le<std::uint16_t>(frame.payload, 36);
+  value.usb_crc_errors = read_le<std::uint16_t>(frame.payload, 40);
+  value.flags = static_cast<std::uint8_t>(read_le<std::uint16_t>(frame.payload, 50));
   value.receive_time_s = receive_time_s;
   if (std::abs(value.theta_actual_rad) > 10.0 * 3.14159265358979323846 / 180.0) {
     return std::nullopt;
@@ -160,43 +236,45 @@ std::optional<TubeStatus> decode_tube_status(const Frame& frame, double receive_
 }
 
 std::optional<ChassisState> decode_chassis_state(const Frame& frame, double receive_time_s) {
-  if (frame.type != kChassisStateV1 || frame.payload.size() != 32U) return std::nullopt;
+  if (frame.type != kChassisStateV1 || frame.payload.size() != 40U) return std::nullopt;
   ChassisState value;
   value.sequence = read_le<std::uint32_t>(frame.payload, 0);
   value.chassis_time_ms = read_le<std::uint32_t>(frame.payload, 4);
-  value.velocity_ref_m_s = static_cast<double>(read_le<std::int16_t>(frame.payload, 8)) / 1000.0;
-  value.acceleration_ref_m_s2 = static_cast<double>(read_le<std::int16_t>(frame.payload, 10)) / 1000.0;
-  value.jerk_ref_m_s3 = static_cast<double>(read_le<std::int16_t>(frame.payload, 12)) / 1000.0;
-  value.velocity_actual_m_s = static_cast<double>(read_le<std::int16_t>(frame.payload, 14)) / 1000.0;
-  value.acceleration_actual_m_s2 = static_cast<double>(read_le<std::int16_t>(frame.payload, 16)) / 1000.0;
-  value.track_error_m = static_cast<double>(read_le<std::int16_t>(frame.payload, 18)) / 10000.0;
-  value.track_quality = static_cast<double>(read_le<std::uint16_t>(frame.payload, 20)) / 1000.0;
-  if (value.track_quality > 1.0) return std::nullopt;
-  if (frame.payload[22] > static_cast<std::uint8_t>(MotionPhase::Decel) || frame.payload[23] > 4U) {
+  value.velocity_ref_m_s = static_cast<double>(read_le<std::int32_t>(frame.payload, 12)) / 1000.0;
+  value.acceleration_ref_m_s2 =
+      static_cast<double>(read_le<std::int32_t>(frame.payload, 16)) / 1000.0;
+  value.jerk_ref_m_s3 = static_cast<double>(read_le<std::int32_t>(frame.payload, 20)) / 1000.0;
+  value.velocity_actual_m_s =
+      static_cast<double>(read_le<std::int32_t>(frame.payload, 24)) / 1000.0;
+  value.acceleration_actual_m_s2 =
+      static_cast<double>(read_le<std::int32_t>(frame.payload, 28)) / 1000.0;
+  if (frame.payload[32] > static_cast<std::uint8_t>(MotionPhase::Decel) ||
+      frame.payload[33] > 4U) {
     return std::nullopt;
   }
-  value.motion_phase = static_cast<MotionPhase>(frame.payload[22]);
-  value.track_segment = static_cast<TrackSegment>(frame.payload[23]);
-  value.events = read_le<std::uint16_t>(frame.payload, 24);
-  value.faults = read_le<std::uint16_t>(frame.payload, 26);
-  value.ttl_ms = read_le<std::uint16_t>(frame.payload, 28);
-  value.yaw_rate_rad_s = static_cast<double>(read_le<std::int16_t>(frame.payload, 30)) / 1000.0;
+  value.motion_phase = static_cast<MotionPhase>(frame.payload[32]);
+  value.track_segment = static_cast<TrackSegment>(frame.payload[33]);
+  value.track_quality = static_cast<double>(frame.payload[34]) / 255.0;
+  value.events = frame.payload[35];
+  value.ttl_ms = read_le<std::uint16_t>(frame.payload, 36);
+  value.faults = read_le<std::uint16_t>(frame.payload, 38);
   value.receive_time_s = receive_time_s;
   return value;
 }
 
 std::vector<std::uint8_t> encode_control_command(const ControlCommand& command) {
-  std::vector<std::uint8_t> output{0xA5, 0x5A, kControlV3, 21, 0};
+  std::vector<std::uint8_t> output{0xA5, 0x5A, kControlV3, 22};
   append_le(output, command.command_id);
   append_le(output, command.source_frame_id);
   append_le(output, command.nx_time_ms);
   append_le(output, rad_to_cdeg(command.theta_cmd_rad));
-  append_le(output, rad_to_cdeg(command.theta_rate_limit_rad_s));
+  append_le(output, rad_to_ucdeg(command.theta_rate_limit_rad_s));
   append_le(output, command.ttl_ms);
-  output.push_back(static_cast<std::uint8_t>(command.control_state));
+  output.push_back(mc02_control_state(command.control_state));
   output.push_back(command.flags);
   output.push_back(0U);
-  const std::uint16_t crc = crc16_ccitt_false(output.data() + 2, output.size() - 2);
+  output.push_back(0U);
+  const std::uint16_t crc = crc16_ccitt_false(output.data(), output.size());
   append_le(output, crc);
   return output;
 }

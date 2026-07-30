@@ -4,11 +4,13 @@
 #include "nx_control/protocol.hpp"
 #include "nx_control/task_manager.hpp"
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -20,6 +22,36 @@ void check(bool condition, const std::string& message) {
     ++failures;
     std::cerr << "FAIL: " << message << '\n';
   }
+}
+
+void put_u16(std::vector<std::uint8_t>& data, std::size_t offset, std::uint16_t value) {
+  data[offset] = static_cast<std::uint8_t>(value);
+  data[offset + 1U] = static_cast<std::uint8_t>(value >> 8U);
+}
+
+void put_u32(std::vector<std::uint8_t>& data, std::size_t offset, std::uint32_t value) {
+  for (std::size_t index = 0; index < 4U; ++index) {
+    data[offset + index] = static_cast<std::uint8_t>(value >> (8U * index));
+  }
+}
+
+void put_i16(std::vector<std::uint8_t>& data, std::size_t offset, std::int16_t value) {
+  put_u16(data, offset, static_cast<std::uint16_t>(value));
+}
+
+void put_i32(std::vector<std::uint8_t>& data, std::size_t offset, std::int32_t value) {
+  put_u32(data, offset, static_cast<std::uint32_t>(value));
+}
+
+std::vector<std::uint8_t> mc02_packet(std::uint8_t type,
+                                     const std::vector<std::uint8_t>& payload) {
+  std::vector<std::uint8_t> packet{0xA5, 0x5A, type,
+                                   static_cast<std::uint8_t>(payload.size())};
+  packet.insert(packet.end(), payload.begin(), payload.end());
+  const auto crc = nx_control::protocol::crc16_ccitt_false(packet);
+  packet.push_back(static_cast<std::uint8_t>(crc));
+  packet.push_back(static_cast<std::uint8_t>(crc >> 8U));
+  return packet;
 }
 
 std::vector<std::uint8_t> vision_v3_packet() {
@@ -79,6 +111,128 @@ void test_protocol() {
   command.ttl_ms = 60;
   const auto encoded = nx_control::protocol::encode_control_command(command);
   check(encoded.size() == nx_control::protocol::kControlV3Length, "control-v3 fixed length");
+
+  nx_control::ControlCommand fault_command;
+  fault_command.command_id = 1;
+  fault_command.theta_rate_limit_rad_s = 50.0 * 3.14159265358979323846 / 180.0;
+  fault_command.ttl_ms = 60;
+  fault_command.control_state = nx_control::TaskState::Fault;
+  fault_command.flags = 0x08U;
+  const std::vector<std::uint8_t> expected_control{
+      0xA5, 0x5A, 0x80, 0x16, 0x01, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x88, 0x13, 0x3C, 0x00, 0x04, 0x08,
+      0x00, 0x00, 0x42, 0x41};
+  check(nx_control::protocol::encode_control_command(fault_command) == expected_control,
+        "MC02 control golden vector");
+
+  const std::array<std::pair<nx_control::TaskState, std::uint8_t>, 9> state_mapping{{
+      {nx_control::TaskState::Idle, 0U},
+      {nx_control::TaskState::StaticMove, 2U},
+      {nx_control::TaskState::HoldCenter, 2U},
+      {nx_control::TaskState::HoldTarget, 2U},
+      {nx_control::TaskState::VehicleAccel, 2U},
+      {nx_control::TaskState::VehicleCruise, 2U},
+      {nx_control::TaskState::VehicleDecel, 2U},
+      {nx_control::TaskState::Safe, 3U},
+      {nx_control::TaskState::Fault, 4U},
+  }};
+  for (const auto& mapping : state_mapping) {
+    nx_control::ControlCommand mapped_command;
+    mapped_command.control_state = mapping.first;
+    const auto mapped_packet = nx_control::protocol::encode_control_command(mapped_command);
+    check(mapped_packet[22] == mapping.second, "NX task state maps to MC02 control state");
+  }
+
+  std::vector<std::uint8_t> status_payload(52U, 0U);
+  put_u32(status_payload, 0, 0x01020304U);
+  put_u32(status_payload, 4, 1234U);
+  put_u32(status_payload, 8, 9U);
+  put_i16(status_payload, 12, 100);
+  put_i16(status_payload, 14, -50);
+  put_i16(status_payload, 16, 25);
+  put_i32(status_payload, 18, 1234);
+  put_i32(status_payload, 22, -2500);
+  put_i16(status_payload, 26, 750);
+  status_payload[28] = 3U;
+  status_payload[29] = 4U;
+  put_u32(status_payload, 30, 0x00000300U);
+  put_u16(status_payload, 34, 12U);
+  put_u16(status_payload, 36, 34U);
+  put_u16(status_payload, 38, 56U);
+  put_u16(status_payload, 40, 78U);
+  put_u16(status_payload, 50, 0x000CU);
+  const auto status_packet = mc02_packet(nx_control::protocol::kTubeStatusV3, status_payload);
+
+  nx_control::protocol::Mc02StreamParser mc02_parser;
+  const std::vector<std::uint8_t> mc02_noise{0x00, 0xA5, 0x00};
+  check(mc02_parser.feed(mc02_noise).empty(), "MC02 parser discards noise");
+  check(mc02_parser.feed(status_packet.data(), 1U).empty(), "MC02 parser holds split magic");
+  const auto status_frames = mc02_parser.feed(status_packet.data() + 1U, status_packet.size() - 1U);
+  check(status_frames.size() == 1U, "MC02 parser accepts status frame");
+  if (!status_frames.empty()) {
+    const auto status = nx_control::protocol::decode_tube_status(status_frames.front(), 10.0);
+    check(status.has_value(), "decode MC02 status");
+    if (status) {
+      check(status->sequence == 0x01020304U && status->dmmc_time_ms == 1234U,
+            "decode MC02 status identifiers");
+      check(std::abs(status->theta_actual_rad -
+                     0.25 * 3.14159265358979323846 / 180.0) < 1e-12,
+            "decode MC02 tube angle");
+      check(std::abs(status->motor_position_rad - 1.234) < 1e-12 &&
+                std::abs(status->motor_velocity_rad_s + 2.5) < 1e-12 &&
+                std::abs(status->motor_torque_nm - 0.75) < 1e-12,
+            "decode MC02 motor feedback");
+      check(status->faults == 0x00000300U && status->can_age_ms == 12U &&
+                status->control_age_ms == 34U && status->usb_crc_errors == 78U &&
+                status->state == 3U && status->flags == 0x0CU,
+            "decode MC02 status diagnostics");
+    }
+  }
+
+  auto bad_status_packet = status_packet;
+  bad_status_packet[12] ^= 0x01U;
+  check(mc02_parser.feed(bad_status_packet).empty() && mc02_parser.crc_errors() == 1U,
+        "MC02 parser rejects bad CRC");
+
+  std::vector<std::uint8_t> chassis_payload(40U, 0U);
+  put_u32(chassis_payload, 0, 11U);
+  put_u32(chassis_payload, 4, 2000U);
+  put_u32(chassis_payload, 8, 2010U);
+  put_i32(chassis_payload, 12, 1000);
+  put_i32(chassis_payload, 16, -2000);
+  put_i32(chassis_payload, 20, 3000);
+  put_i32(chassis_payload, 24, 4000);
+  put_i32(chassis_payload, 28, -5000);
+  chassis_payload[32] = 3U;
+  chassis_payload[33] = 2U;
+  chassis_payload[34] = 255U;
+  chassis_payload[35] = 0x5AU;
+  put_u16(chassis_payload, 36, 100U);
+  put_u16(chassis_payload, 38, 0x1234U);
+  const auto chassis_packet =
+      mc02_packet(nx_control::protocol::kChassisStateV1, chassis_payload);
+  const auto chassis_frames = mc02_parser.feed(chassis_packet);
+  check(chassis_frames.size() == 1U, "MC02 parser accepts chassis frame");
+  if (!chassis_frames.empty()) {
+    const auto chassis = nx_control::protocol::decode_chassis_state(chassis_frames.front(), 11.0);
+    check(chassis.has_value(), "decode MC02 chassis state");
+    if (chassis) {
+      check(chassis->sequence == 11U && chassis->chassis_time_ms == 2000U,
+            "decode MC02 chassis identifiers");
+      check(std::abs(chassis->velocity_ref_m_s - 1.0) < 1e-12 &&
+                std::abs(chassis->acceleration_ref_m_s2 + 2.0) < 1e-12 &&
+                std::abs(chassis->jerk_ref_m_s3 - 3.0) < 1e-12 &&
+                std::abs(chassis->velocity_actual_m_s - 4.0) < 1e-12 &&
+                std::abs(chassis->acceleration_actual_m_s2 + 5.0) < 1e-12,
+            "decode MC02 chassis dynamics");
+      check(chassis->motion_phase == nx_control::MotionPhase::Curve &&
+                chassis->track_segment == nx_control::TrackSegment::BC &&
+                chassis->track_quality == 1.0 && chassis->events == 0x5AU &&
+                chassis->ttl_ms == 100U && chassis->faults == 0x1234U,
+            "decode MC02 chassis metadata");
+    }
+  }
 }
 
 void test_delayed_observer() {

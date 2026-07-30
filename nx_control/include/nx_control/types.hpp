@@ -60,7 +60,7 @@ struct TubeStatus {
   double motor_position_rad = 0.0;
   double motor_velocity_rad_s = 0.0;
   double motor_torque_nm = 0.0;
-  std::uint16_t faults = 0;
+  std::uint32_t faults = 0;
   std::uint16_t can_age_ms = 0;
   std::uint16_t usb_crc_errors = 0;
   std::uint16_t control_age_ms = 0;

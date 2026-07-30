@@ -45,6 +45,23 @@ class StreamParser {
   std::uint64_t discarded_bytes_ = 0;
 };
 
+class Mc02StreamParser {
+ public:
+  std::vector<Frame> feed(const std::uint8_t* data, std::size_t size);
+  std::vector<Frame> feed(const std::vector<std::uint8_t>& data) {
+    return feed(data.data(), data.size());
+  }
+  std::uint64_t crc_errors() const { return crc_errors_; }
+  std::uint64_t length_errors() const { return length_errors_; }
+  std::uint64_t discarded_bytes() const { return discarded_bytes_; }
+
+ private:
+  std::vector<std::uint8_t> buffer_;
+  std::uint64_t crc_errors_ = 0;
+  std::uint64_t length_errors_ = 0;
+  std::uint64_t discarded_bytes_ = 0;
+};
+
 std::optional<VisionMeasurement> decode_vision(const Frame& frame, double receive_time_s);
 std::optional<TubeStatus> decode_tube_status(const Frame& frame, double receive_time_s);
 std::optional<ChassisState> decode_chassis_state(const Frame& frame, double receive_time_s);

@@ -100,7 +100,7 @@ int main(int argc, char** argv) {
     }
 
     nx_control::protocol::StreamParser vision_parser;
-    nx_control::protocol::StreamParser dmmc_parser;
+    nx_control::protocol::Mc02StreamParser dmmc_parser;
     nx_control::TubeStatus latest_tube;
     nx_control::ChassisState latest_chassis;
     bool have_tube = false;

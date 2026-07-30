@@ -1,6 +1,16 @@
 # NX 控制通信协议
 
-所有多字节字段均为小端。帧结构统一为：
+NX 当前使用两种线格式：
+
+- 视觉 UDP 使用 NX 视觉帧格式；
+- DMMC 串口使用现有 MC02 固件帧格式。
+
+两者不可混用。`src/main.cpp` 分别使用 `StreamParser` 和
+`Mc02StreamParser` 解析这两条链路。
+
+## 视觉 UDP 帧格式
+
+所有多字节字段均为小端：
 
 | 偏移 | 长度 | 字段 |
 |---:|---:|---|
@@ -10,30 +20,44 @@
 | 5 | N | Payload |
 | 5+N | 2 | CRC-16/CCITT-FALSE |
 
-CRC 覆盖类型、长度和 Payload，不覆盖 Magic。标准向量 `123456789` 必须得到
-`0x29B1`。接收器按 Magic 重同步，拒绝超过128字节的 Payload、错误长度和错误
-CRC。
+CRC 覆盖类型、长度和 Payload，不覆盖 Magic。标准向量
+`123456789` 必须得到 `0x29B1`。
 
-## 视觉 `tube-v2` / `tube-v3`
+### 视觉 `tube-v2` / `tube-v3`
 
-`tube-v2` 类型为 `0x02`，Payload 11字节，总长18字节。`tube-v3` 类型为
-`0x03`，在相同11字节之后追加采集时刻，总长22字节：
+`tube-v2` 类型为 `0x02`，Payload 11字节，总长18字节。
+`tube-v3` 类型为 `0x03`，在相同11字节之后追加采集时刻，
+Payload 15字节，总长22字节。
 
 | Payload偏移 | 长度 | 类型 | 字段/单位 |
 |---:|---:|---|---|
 | 0 | 4 | uint32 | frame_id |
-| 4 | 1 | uint8 | status：0丢失、1实测、2短时预测 |
-| 5 | 2 | int16 | position，cm×100 |
-| 7 | 2 | uint16 | ball_confidence，0–1000 |
-| 9 | 2 | uint16 | tube_confidence，0–1000 |
-| 11 | 4 | uint32 | capture_time_ms，仅v3，NX `CLOCK_MONOTONIC` 低32位 |
+| 4 | 1 | uint8 | status：丢失/实测/短时预测 |
+| 5 | 2 | int16 | position，m×10000 |
+| 7 | 2 | uint16 | ball_confidence，0～1000 |
+| 9 | 2 | uint16 | tube_confidence，0～1000 |
+| 11 | 4 | uint32 | capture_time_ms，仅v3 |
 
-状态0时位置和两个置信度必须为0，采集时刻仍保留。C++端处理32位回绕，并把
-迟到测量放回曝光时刻更新后重放到当前控制时刻。
+状态为丢失时，位置和两个置信度必须为0。
 
-## NX→DMMC `tube-control-v3`
+## MC02 串口帧格式
 
-类型 `0x80`，Payload 21字节，总长28字节：
+所有多字节字段均为小端：
+
+| 偏移 | 长度 | 字段 |
+|---:|---:|---|
+| 0 | 2 | Magic `A5 5A` |
+| 2 | 1 | 消息类型 |
+| 3 | 1 | Payload 长度 |
+| 4 | N | Payload |
+| 4+N | 2 | CRC-16/CCITT-FALSE，低字节在前 |
+
+CRC 覆盖 Magic、类型、长度和 Payload，即除末尾CRC外的整个帧。
+MC02接受的最大Payload长度为56字节。
+
+### NX→MC02 `tube-control-v3`
+
+类型为 `0x80`，Payload 22字节，总长28字节：
 
 | Payload偏移 | 长度 | 类型 | 字段/单位 |
 |---:|---:|---|---|
@@ -41,56 +65,79 @@ CRC。
 | 4 | 4 | uint32 | source_frame_id |
 | 8 | 4 | uint32 | nx_time_ms |
 | 12 | 2 | int16 | theta_cmd，0.01° |
-| 14 | 2 | int16 | theta_rate_limit，0.01°/s |
+| 14 | 2 | uint16 | theta_rate_limit，0.01°/s |
 | 16 | 2 | uint16 | ttl_ms |
-| 18 | 1 | uint8 | control_state |
+| 18 | 1 | uint8 | MC02控制状态 |
 | 19 | 1 | uint8 | flags |
-| 20 | 1 | uint8 | 保留，发送0 |
+| 20 | 2 | uint16 | 保留，发送0 |
 
-`flags`：bit0机构使能，bit1清除可恢复告警，bit2建议底盘减速，bit3建议底盘
-停车。`control_state` 的0–8依次为 IDLE、STATIC_MOVE、HOLD_CENTER、
-HOLD_TARGET、VEHICLE_ACCEL、VEHICLE_CRUISE、VEHICLE_DECEL、SAFE、FAULT。
+NX任务状态在线路上按下表映射：
 
-## DMMC→NX `tube-status-v3`
+| NX状态 | MC02状态 |
+|---|---|
+| Idle | Disabled (`0`) |
+| StaticMove、HoldCenter、HoldTarget | Track (`2`) |
+| VehicleAccel、VehicleCruise、VehicleDecel | Track (`2`) |
+| Safe | Safe (`3`) |
+| Fault | Fault (`4`) |
 
-类型 `0x90`，Payload 32字节，总长39字节：
+`flags`：bit0机构使能、bit1清除可恢复告警、bit2建议底盘减速、
+bit3建议底盘停车。
+
+固定测试向量：
+
+```text
+A5 5A 80 16 01 00 00 00 00 00 00 00 00 00 00 00
+00 00 88 13 3C 00 04 08 00 00 42 41
+```
+
+其中CRC数值为 `0x4142`，线上小端字节为 `42 41`。
+
+### MC02→NX `tube-status-v3`
+
+类型为 `0x90`，Payload 52字节，总长58字节：
+
+| Payload偏移 | 长度 | 类型 | 字段/单位 |
+|---:|---:|---|---|
+| 0 | 4 | uint32 | status_id |
+| 4 | 4 | uint32 | MC02本地时间，ms |
+| 8 | 4 | uint32 | 回显command_id |
+| 12/14/16 | 各2 | int16 | target/reference/actual，0.01° |
+| 18 | 4 | int32 | motor_position，mrad |
+| 22 | 4 | int32 | motor_velocity，mrad/s |
+| 26 | 2 | int16 | motor_torque，mN·m |
+| 28 | 1 | uint8 | 控制器状态 |
+| 29 | 1 | uint8 | 电机状态 |
+| 30 | 4 | uint32 | fault_flags |
+| 34 | 2 | uint16 | CAN反馈年龄，ms |
+| 36 | 2 | uint16 | USB控制命令年龄，ms |
+| 38 | 2 | uint16 | 有效USB帧数 |
+| 40 | 2 | uint16 | USB CRC错误数 |
+| 42 | 2 | uint16 | USB序列错误数 |
+| 44 | 2 | uint16 | CAN反馈帧数 |
+| 46 | 2 | uint16 | 500Hz超时数 |
+| 48 | 2 | uint16 | USB发送丢帧数 |
+| 50 | 2 | uint16 | 底盘安全请求标志 |
+
+### MC02→NX `chassis-state-v1`
+
+类型为 `0x91`，Payload 40字节，总长46字节：
 
 | Payload偏移 | 长度 | 类型 | 字段/单位 |
 |---:|---:|---|---|
 | 0 | 4 | uint32 | sequence |
-| 4 | 4 | uint32 | dmmc_time_ms |
-| 8/10/12 | 各2 | int16 | target/reference/actual，0.01° |
-| 14 | 4 | int32 | motor_position，mrad |
-| 18 | 2 | int16 | motor_velocity，0.01 rad/s |
-| 20 | 2 | int16 | motor_torque，mN·m |
-| 22 | 2 | uint16 | faults |
-| 24 | 2 | uint16 | can_age_ms |
-| 26 | 2 | uint16 | usb_crc_errors |
-| 28 | 2 | uint16 | control_age_ms |
-| 30 | 1 | uint8 | DMMC状态 |
-| 31 | 1 | uint8 | 状态标志 |
+| 4 | 4 | uint32 | 底盘源时间，ms |
+| 8 | 4 | uint32 | MC02接收时间，ms |
+| 12 | 4 | int32 | v_ref，mm/s |
+| 16 | 4 | int32 | a_ref，mm/s² |
+| 20 | 4 | int32 | jerk_ref，mm/s³ |
+| 24 | 4 | int32 | v_actual，mm/s |
+| 28 | 4 | int32 | a_actual，mm/s² |
+| 32 | 1 | uint8 | motion_phase |
+| 33 | 1 | uint8 | track_segment |
+| 34 | 1 | uint8 | track_quality，NX归一化为0～1 |
+| 35 | 1 | uint8 | events |
+| 36 | 2 | uint16 | ttl_ms |
+| 38 | 2 | uint16 | fault_flags |
 
-## DMMC→NX `chassis-state-v1`
-
-类型 `0x91`，Payload 32字节，总长39字节：
-
-| Payload偏移 | 长度 | 类型 | 字段/单位 |
-|---:|---:|---|---|
-| 0 | 4 | uint32 | sequence |
-| 4 | 4 | uint32 | chassis_time_ms |
-| 8 | 2 | int16 | v_ref，mm/s |
-| 10 | 2 | int16 | a_ref，mm/s² |
-| 12 | 2 | int16 | jerk_ref，mm/s³ |
-| 14 | 2 | int16 | v_actual，mm/s |
-| 16 | 2 | int16 | a_actual，mm/s² |
-| 18 | 2 | int16 | track_error，0.1 mm |
-| 20 | 2 | uint16 | track_quality，0–1000 |
-| 22 | 1 | uint8 | motion_phase：停止/启动/巡航/弯道/制动=0–4 |
-| 23 | 1 | uint8 | track_segment：未知/AB/BC/CD/DA=0–4 |
-| 24 | 2 | uint16 | events；bit0为开始事件 |
-| 26 | 2 | uint16 | faults |
-| 28 | 2 | uint16 | ttl_ms |
-| 30 | 2 | int16 | yaw_rate，mrad/s |
-
-本文件是 NX 与 DMMC 两端的字节级契约；DMMC 工程实现时应直接用这里的固定
-长度和缩放，避免依赖 C 结构体对齐。
+MC02当前不提供 `track_error` 和 `yaw_rate`，NX解码后将它们保留为0。
