@@ -53,6 +53,8 @@ std::uint8_t mc02_control_state(TaskState state) {
   switch (state) {
     case TaskState::Idle:
       return 0U;
+    case TaskState::StandbyHold:
+      return 1U;
     case TaskState::StaticMove:
     case TaskState::HoldCenter:
     case TaskState::HoldTarget:

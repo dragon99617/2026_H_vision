@@ -115,7 +115,8 @@ python3 run.py --no-serial --protocol tube-v3 \
 - `--task auto`：指定位置不变，状态随底盘启动/巡航/制动切换；
 - `--wait-start`：等待 `chassis-state-v1.events bit0` 上升沿再开始。
 - `--key-start`：在前台终端等待键盘，按`d`立即开始或从头重启一次任务，无需
-  回车；该模式不响应底盘启动事件。
+  回车；该模式不响应底盘启动事件。Task3等待期持续以0°
+  `HOLD`保持横梁，不关闭电机。
 
 只有明确的`--task 3`静止任务允许在缺少新鲜`chassis-state-v1`时按底盘加速度
 为0继续运行。其他所有任务（包括旧`--task static`）仍要求底盘状态新鲜且无故障。
@@ -174,6 +175,6 @@ python3 tools/analyze_log.py replay-output.csv --json replay-metrics.json
 当前代码已通过 OSQP 0.6.3 软件构建、单测和离线重放；相机、DMMC及底盘实机接口
 仍需按上述顺序验收，不能用软件测试结果代替真机验收。
 
-NX的摆杆命令硬限幅为`±0.5°`，角速度限制为`5°/s`，与DMMC02/STM32的
-`hard_angle_limit_deg=0.5°`一致。修改STM32限幅时必须同步修改
-`config/nx-control.conf`中的`theta_limit_rad`，避免DMMC02置位角度越界故障。
+NX的摆杆命令硬限幅为`±2.0°`，角速度限制保持为`5°/s`，与DMMC02新固件的
+`hard_angle_limit_deg=2.0°`一致。`tube-control-v3`在线路上仍使用厘度：
+`theta_cmd_cdeg`的1 LSB为`0.01°`。

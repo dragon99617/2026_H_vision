@@ -76,6 +76,7 @@ NX任务状态在线路上按下表映射：
 | NX状态 | MC02状态 |
 |---|---|
 | Idle | Disabled (`0`) |
+| StandbyHold | Hold (`1`) |
 | StaticMove、HoldCenter、HoldTarget | Track (`2`) |
 | VehicleAccel、VehicleCruise、VehicleDecel | Track (`2`) |
 | Safe | Safe (`3`) |
@@ -84,8 +85,8 @@ NX任务状态在线路上按下表映射：
 `flags`：bit0机构使能、bit1清除可恢复告警、bit2建议底盘减速、
 bit3建议底盘停车。
 
-固定HOLD通信工具在线路上直接发送`control_state=1`，与上表所述闭环任务状态
-到Track状态的映射相互独立。
+Task3等待启动按键时使用`StandbyHold`，固定下发0°并保持机构使能。
+固定HOLD通信工具也在线路上直接发送`control_state=1`。
 
 固定测试向量：
 

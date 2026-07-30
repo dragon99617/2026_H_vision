@@ -168,6 +168,8 @@ ControlOutput NxController::tick(double now_s) {
 
   const ChassisState* chassis = chassis_valid ? &chassis_sync_.latest() : nullptr;
   output.reference = task_manager_.update(now_s, output.estimate, chassis);
+  const bool contest3_waiting_for_start =
+      task_manager_.mode() == TaskMode::Contest3 && task_manager_.state() == TaskState::Idle;
   std::vector<double> acceleration_forecast =
       chassis_sync_.acceleration_reference_forecast(now_s, config_.horizon, config_.period_s);
   std::vector<ReferencePoint> reference = task_manager_.reference_horizon(config_.horizon);
@@ -183,8 +185,9 @@ ControlOutput NxController::tick(double now_s) {
   const bool chassis_stale = !chassis_valid;
   const bool chassis_fresh_required = task_manager_.mode() != TaskMode::Contest3;
   const bool chassis_gate_failed = chassis_fresh_required && chassis_stale;
-  const bool force_safe_feedforward = vision_lost || chassis_gate_failed;
-  if (vision_lost) {
+  const bool vision_gate_failed = !contest3_waiting_for_start && vision_lost;
+  const bool force_safe_feedforward = vision_gate_failed || chassis_gate_failed;
+  if (vision_gate_failed) {
     output.request_stop = true;
     output.reason = "vision_stale";
   }
@@ -234,25 +237,28 @@ ControlOutput NxController::tick(double now_s) {
     }
   }
 
-  if (solver_failures_ >= config_.stop_after_failures ||
-      (first_solver_failure_s_ >= 0.0 &&
-       now_s - first_solver_failure_s_ >= config_.stop_after_failure_s)) {
+  if (!contest3_waiting_for_start &&
+      (solver_failures_ >= config_.stop_after_failures ||
+       (first_solver_failure_s_ >= 0.0 &&
+        now_s - first_solver_failure_s_ >= config_.stop_after_failure_s))) {
     output.request_stop = true;
     output.used_fallback = true;
     output.reason = "persistent_solver_failure";
   }
-  if (std::abs(output.estimate.position_m) > config_.position_soft_limit_m - 0.010 ||
-      output.max_predicted_slack_m > 0.0001) {
+  if (!contest3_waiting_for_start &&
+      (std::abs(output.estimate.position_m) > config_.position_soft_limit_m - 0.010 ||
+       output.max_predicted_slack_m > 0.0001)) {
     output.request_slowdown = true;
   }
-  if (std::abs(output.estimate.position_m) > config_.position_safe_limit_m ||
-      (latest_visual_position_valid_ &&
-       std::abs(latest_visual_position_m_) > config_.position_safe_limit_m)) {
+  if (!contest3_waiting_for_start &&
+      (std::abs(output.estimate.position_m) > config_.position_safe_limit_m ||
+       (latest_visual_position_valid_ &&
+        std::abs(latest_visual_position_m_) > config_.position_safe_limit_m))) {
     output.request_stop = true;
     output.reason = "ball_safety_boundary";
   }
-  if (dmmc_stale) requested_u = 0.0;
-  requested_u = rate_limit_and_clamp(requested_u);
+  if (dmmc_stale || contest3_waiting_for_start) requested_u = 0.0;
+  requested_u = contest3_waiting_for_start ? 0.0 : rate_limit_and_clamp(requested_u);
   previous_command_u_ = requested_u;
   output.u_command_m_s2 = requested_u;
   output.solver_failures = solver_failures_;
@@ -266,7 +272,8 @@ ControlOutput NxController::tick(double now_s) {
   command.ttl_ms = 60;
   command.control_state = output.request_stop
                               ? (dmmc_stale ? TaskState::Fault : TaskState::Safe)
-                              : task_manager_.state();
+                              : (contest3_waiting_for_start ? TaskState::StandbyHold
+                                                            : task_manager_.state());
   command.flags = dmmc_stale ? 0U : 0x01U;
   if (output.request_slowdown) command.flags |= 0x04U;
   if (output.request_stop) command.flags |= 0x08U;

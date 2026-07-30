@@ -78,6 +78,20 @@ class ZeroSolver final : public nx_control::QpSolver {
   const char* name() const override { return "zero-test"; }
 };
 
+class LargePositiveSolver final : public nx_control::QpSolver {
+ public:
+  nx_control::QpResult solve(const nx_control::QpProblem& problem) override {
+    nx_control::QpResult result;
+    result.solved = true;
+    result.iterations = 1;
+    result.primal = Eigen::VectorXd::Zero(problem.hessian.rows());
+    result.primal(0) = 1000.0;
+    result.status = "solved";
+    return result;
+  }
+  const char* name() const override { return "large-positive-test"; }
+};
+
 void test_protocol() {
   check(nx_control::protocol::crc16_ccitt_false(
             reinterpret_cast<const std::uint8_t*>("123456789"), 9) == 0x29B1,
@@ -155,8 +169,9 @@ void test_protocol() {
   check(nx_control::protocol::encode_control_command(fault_command) == expected_control,
         "MC02 control golden vector");
 
-  const std::array<std::pair<nx_control::TaskState, std::uint8_t>, 9> state_mapping{{
+  const std::array<std::pair<nx_control::TaskState, std::uint8_t>, 10> state_mapping{{
       {nx_control::TaskState::Idle, 0U},
+      {nx_control::TaskState::StandbyHold, 1U},
       {nx_control::TaskState::StaticMove, 2U},
       {nx_control::TaskState::HoldCenter, 2U},
       {nx_control::TaskState::HoldTarget, 2U},
@@ -321,8 +336,11 @@ void test_remote_clock_sync() {
 void test_mpc_constraints() {
   nx_control::ControlConfig config;
   check(std::abs(config.theta_limit_rad -
-                 0.5 * 3.14159265358979323846 / 180.0) < 1e-12,
-        "NX default angle limit matches STM32 0.5 degree hard limit");
+                 2.0 * 3.14159265358979323846 / 180.0) < 1e-12,
+        "NX default angle limit matches DMMC02 2.0 degree hard limit");
+  check(std::abs(config.theta_rate_limit_rad_s -
+                 5.0 * 3.14159265358979323846 / 180.0) < 1e-12,
+        "NX default angle rate limit remains 5 degrees per second");
   config.horizon = 12;
   config.solver_deadline_ms = 1000.0;
   config.qp_max_iterations = 1000;
@@ -332,6 +350,13 @@ void test_mpc_constraints() {
   std::vector<nx_control::ReferencePoint> reference(12);
   std::vector<double> acceleration(12, 0.3);
   const auto result = mpc.solve({0.03, 0.0, 0.0, 0.0}, 0.0, reference, acceleration);
+  const auto& problem = mpc.last_problem();
+  const double expected_u_limit = nx_control::kGravity * std::tan(config.theta_limit_rad);
+  check(std::abs(problem.lower(config.horizon) +
+                 expected_u_limit / config.input_scale_m_s2) < 1e-12 &&
+            std::abs(problem.upper(config.horizon) -
+                     expected_u_limit / config.input_scale_m_s2) < 1e-12,
+        "MPC input bounds are exactly plus/minus 2.0 degrees");
 #ifdef NX_CONTROL_HAS_OSQP
   check(result.backend == "osqp", "production build selects the OSQP backend");
 #endif
@@ -380,7 +405,14 @@ void test_task_manager() {
   state.position_m = -0.05;
   task.update(1.22, state, nullptr);
   task.update(1.43, state, nullptr);
-  check(task.static_sequence_complete(), "contest task 3 completes after stable -5 cm");
+  check(task.static_sequence_complete() &&
+            task.state() == nx_control::TaskState::HoldTarget &&
+            std::abs(task.target_m() + 0.05) < 1e-12,
+        "contest task 3 holds -5 cm after the second 0.2 second stable period");
+  task.update(2.0, state, nullptr);
+  check(task.state() == nx_control::TaskState::HoldTarget &&
+            std::abs(task.target_m() + 0.05) < 1e-12,
+        "contest task 3 continues holding -5 cm after completion");
 
   nx_control::ChassisState chassis;
   chassis.events = 0x0001U;
@@ -454,6 +486,59 @@ void test_controller_safety() {
         "stale vision/chassis requests stop");
 }
 
+void test_controller_angle_limit() {
+  nx_control::ControlConfig config;
+  config.solver_deadline_ms = 1000.0;
+  nx_control::NxController controller(config, std::make_unique<LargePositiveSolver>());
+  controller.reset(20.0);
+  controller.configure_task(nx_control::TaskMode::HoldCenter, 0.0, true);
+
+  nx_control::ControlOutput output;
+  double previous_theta_rad = 0.0;
+  for (std::uint32_t sequence = 1; sequence <= 30; ++sequence) {
+    const double now_s = 20.0 + static_cast<double>(sequence) * config.period_s;
+    const auto now_ms = static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
+
+    nx_control::TubeStatus tube;
+    tube.sequence = sequence;
+    tube.dmmc_time_ms = now_ms;
+    tube.receive_time_s = now_s;
+    controller.ingest_tube_status(tube);
+
+    nx_control::ChassisState chassis;
+    chassis.sequence = sequence;
+    chassis.chassis_time_ms = now_ms;
+    chassis.receive_time_s = now_s;
+    chassis.ttl_ms = 100;
+    controller.ingest_chassis_state(chassis);
+
+    nx_control::VisionMeasurement vision;
+    vision.frame_id = sequence;
+    vision.status = nx_control::VisionStatus::Measured;
+    vision.ball_confidence = vision.tube_confidence = 1.0;
+    vision.capture_time_ms = now_ms;
+    vision.has_capture_time = true;
+    vision.receive_time_s = now_s;
+    controller.ingest_vision(vision);
+
+    output = controller.tick(now_s);
+    check(output.command.theta_cmd_rad <= config.theta_limit_rad + 1e-12,
+          "controller final output does not exceed 2.0 degrees");
+    check(output.command.theta_cmd_rad - previous_theta_rad <=
+              config.theta_rate_limit_rad_s * config.period_s + 1e-12,
+          "controller final output retains the 5 degrees per second rate limit");
+    previous_theta_rad = output.command.theta_cmd_rad;
+  }
+
+  check(std::abs(output.command.theta_cmd_rad - config.theta_limit_rad) < 1e-12,
+        "controller final output clamps at the same 2.0 degree limit as MPC");
+  const auto packet = nx_control::protocol::encode_control_command(output.command);
+  check(packet[16] == 0xC8U && packet[17] == 0x00U,
+        "tube-control-v3 still encodes 2.0 degrees as 200 cdeg");
+  check(packet[18] == 0xF4U && packet[19] == 0x01U,
+        "tube-control-v3 still encodes the rate limit as 500 cdeg per second");
+}
+
 void test_contest3_chassis_gate() {
   nx_control::ControlConfig config;
   config.solver_deadline_ms = 1000.0;
@@ -495,6 +580,48 @@ void test_contest3_chassis_gate() {
         "contest task 4/5 still requires fresh chassis");
 }
 
+void test_contest3_waiting_holds_beam() {
+  nx_control::ControlConfig config;
+  config.solver_deadline_ms = 1000.0;
+  nx_control::NxController controller(config, std::make_unique<ZeroSolver>());
+  controller.reset(60.0);
+  controller.configure_task(nx_control::TaskMode::Contest3, 0.0, false, false);
+
+  nx_control::TubeStatus tube;
+  tube.sequence = 1;
+  tube.dmmc_time_ms = 60000U;
+  tube.receive_time_s = 60.0;
+  controller.ingest_tube_status(tube);
+
+  const auto waiting = controller.tick(60.0 + config.period_s);
+  check(!waiting.request_stop &&
+            waiting.command.control_state == nx_control::TaskState::StandbyHold &&
+            std::abs(waiting.command.theta_cmd_rad) < 1e-12 &&
+            (waiting.command.flags & 0x01U) != 0U,
+        "contest task 3 waiting keeps motor enabled in zero-degree HOLD");
+  const auto packet = nx_control::protocol::encode_control_command(waiting.command);
+  check(packet[16] == 0U && packet[17] == 0U && packet[22] == 1U,
+        "contest task 3 waiting emits zero-degree MC02 HOLD");
+
+  nx_control::VisionMeasurement vision;
+  vision.frame_id = 1;
+  vision.status = nx_control::VisionStatus::Measured;
+  vision.ball_confidence = vision.tube_confidence = 1.0;
+  vision.capture_time_ms = 60040U;
+  vision.has_capture_time = true;
+  vision.receive_time_s = 60.04;
+  controller.ingest_vision(vision);
+  tube.sequence = 2;
+  tube.dmmc_time_ms = 60040U;
+  tube.receive_time_s = 60.04;
+  controller.ingest_tube_status(tube);
+
+  controller.start_task(60.04);
+  const auto started = controller.tick(60.04);
+  check(started.command.control_state == nx_control::TaskState::StaticMove,
+        "contest task 3 leaves HOLD when the start key is pressed");
+}
+
 }  // namespace
 
 int main() {
@@ -505,7 +632,9 @@ int main() {
   test_mpc_actuator_delay();
   test_task_manager();
   test_controller_safety();
+  test_controller_angle_limit();
   test_contest3_chassis_gate();
+  test_contest3_waiting_holds_beam();
   if (failures != 0) {
     std::cerr << failures << " test(s) failed\n";
     return 1;
