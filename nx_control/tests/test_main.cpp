@@ -131,7 +131,7 @@ void test_protocol() {
   hold_command.source_frame_id = 20;
   hold_command.nx_time_ms = 30;
   hold_command.theta_cmd_cdeg = 20;
-  hold_command.theta_rate_limit_cdeg_s = 500;
+  hold_command.theta_rate_limit_cdeg_s = 200;
   hold_command.ttl_ms = 200;
   hold_command.control_state = 1;
   hold_command.flags = 0x03U;
@@ -143,8 +143,8 @@ void test_protocol() {
         "HOLD control-v3 identifiers and timestamp");
   check(encoded_hold[16] == 0x14U && encoded_hold[17] == 0U,
         "HOLD control-v3 +20 cdeg angle");
-  check(encoded_hold[18] == 0xF4U && encoded_hold[19] == 0x01U,
-        "HOLD control-v3 500 cdeg/s rate limit");
+  check(encoded_hold[18] == 0xC8U && encoded_hold[19] == 0x00U,
+        "HOLD control-v3 200 cdeg/s rate limit");
   check(encoded_hold[20] == 0xC8U && encoded_hold[21] == 0U,
         "HOLD control-v3 200ms TTL");
   check(encoded_hold[22] == 1U && encoded_hold[23] == 0x03U &&
@@ -157,15 +157,15 @@ void test_protocol() {
 
   nx_control::ControlCommand fault_command;
   fault_command.command_id = 1;
-  fault_command.theta_rate_limit_rad_s = 5.0 * 3.14159265358979323846 / 180.0;
+  fault_command.theta_rate_limit_rad_s = 2.0 * 3.14159265358979323846 / 180.0;
   fault_command.ttl_ms = 60;
   fault_command.control_state = nx_control::TaskState::Fault;
   fault_command.flags = 0x08U;
   const std::vector<std::uint8_t> expected_control{
       0xA5, 0x5A, 0x80, 0x16, 0x01, 0x00, 0x00, 0x00,
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-      0x00, 0x00, 0xF4, 0x01, 0x3C, 0x00, 0x04, 0x08,
-      0x00, 0x00, 0x61, 0xB7};
+      0x00, 0x00, 0xC8, 0x00, 0x3C, 0x00, 0x04, 0x08,
+      0x00, 0x00, 0x6B, 0x58};
   check(nx_control::protocol::encode_control_command(fault_command) == expected_control,
         "MC02 control golden vector");
 
@@ -339,8 +339,17 @@ void test_mpc_constraints() {
                  4.0 * 3.14159265358979323846 / 180.0) < 1e-12,
         "NX default angle limit matches DMMC02 4.0 degree hard limit");
   check(std::abs(config.theta_rate_limit_rad_s -
-                 5.0 * 3.14159265358979323846 / 180.0) < 1e-12,
-        "NX default angle rate limit remains 5 degrees per second");
+                 2.0 * 3.14159265358979323846 / 180.0) < 1e-12,
+        "NX default angle rate limit is 2 degrees per second");
+  check(std::abs(config.position_scale_m - 0.010) < 1e-12 &&
+            std::abs(config.velocity_scale_m_s - 0.015) < 1e-12 &&
+            std::abs(config.input_scale_m_s2 - 0.100) < 1e-12 &&
+            std::abs(config.delta_input_scale_m_s2 - 0.015) < 1e-12,
+        "MPC scales penalize velocity, angle, and angle changes more strongly");
+  check(std::abs(config.hold_enter_position_error_m - 0.004) < 1e-12 &&
+            std::abs(config.hold_enter_velocity_m_s - 0.015) < 1e-12 &&
+            std::abs(config.hold_exit_position_error_m - 0.008) < 1e-12,
+        "HoldTarget deadband defaults are 4 mm, 15 mm/s, and 8 mm");
   config.horizon = 12;
   config.solver_deadline_ms = 1000.0;
   config.qp_max_iterations = 1000;
@@ -407,12 +416,29 @@ void test_task_manager() {
   task.update(1.43, state, nullptr);
   check(task.static_sequence_complete() &&
             task.state() == nx_control::TaskState::HoldTarget &&
-            std::abs(task.target_m() + 0.05) < 1e-12,
+            std::abs(task.target_m() + 0.05) < 1e-12 &&
+            task.target_hold_deadband_active(),
         "contest task 3 holds -5 cm after the second 0.2 second stable period");
+
+  state.position_m = -0.044;
+  state.velocity_m_s = 0.050;
   task.update(2.0, state, nullptr);
   check(task.state() == nx_control::TaskState::HoldTarget &&
-            std::abs(task.target_m() + 0.05) < 1e-12,
-        "contest task 3 continues holding -5 cm after completion");
+            task.target_hold_deadband_active(),
+        "HoldTarget deadband remains active inside the 8 mm exit threshold");
+  state.position_m = -0.041;
+  task.update(2.1, state, nullptr);
+  check(!task.target_hold_deadband_active(),
+        "HoldTarget deadband exits when position error exceeds 8 mm");
+  state.position_m = -0.047;
+  state.velocity_m_s = 0.016;
+  task.update(2.2, state, nullptr);
+  check(!task.target_hold_deadband_active(),
+        "HoldTarget deadband does not enter above 15 mm/s");
+  state.velocity_m_s = 0.014;
+  task.update(2.3, state, nullptr);
+  check(task.target_hold_deadband_active(),
+        "HoldTarget deadband enters inside 4 mm below 15 mm/s");
 
   nx_control::ChassisState chassis;
   chassis.events = 0x0001U;
@@ -495,7 +521,7 @@ void test_controller_angle_limit() {
 
   nx_control::ControlOutput output;
   double previous_theta_rad = 0.0;
-  for (std::uint32_t sequence = 1; sequence <= 50; ++sequence) {
+  for (std::uint32_t sequence = 1; sequence <= 120; ++sequence) {
     const double now_s = 20.0 + static_cast<double>(sequence) * config.period_s;
     const auto now_ms = static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
 
@@ -526,7 +552,7 @@ void test_controller_angle_limit() {
           "controller final output does not exceed 4.0 degrees");
     check(output.command.theta_cmd_rad - previous_theta_rad <=
               config.theta_rate_limit_rad_s * config.period_s + 1e-12,
-          "controller final output retains the 5 degrees per second rate limit");
+          "controller final output retains the 2 degrees per second rate limit");
     previous_theta_rad = output.command.theta_cmd_rad;
   }
 
@@ -535,8 +561,71 @@ void test_controller_angle_limit() {
   const auto packet = nx_control::protocol::encode_control_command(output.command);
   check(packet[16] == 0x90U && packet[17] == 0x01U,
         "tube-control-v3 still encodes 4.0 degrees as 400 cdeg");
-  check(packet[18] == 0xF4U && packet[19] == 0x01U,
-        "tube-control-v3 still encodes the rate limit as 500 cdeg per second");
+  check(packet[18] == 0xC8U && packet[19] == 0x00U,
+        "tube-control-v3 encodes the rate limit as 200 cdeg per second");
+}
+
+void test_controller_hold_deadband() {
+  nx_control::ControlConfig config;
+  config.solver_deadline_ms = 1000.0;
+  nx_control::NxController controller(config, std::make_unique<LargePositiveSolver>());
+  controller.reset(70.0);
+  controller.configure_task(nx_control::TaskMode::HoldCenter, 0.0, true);
+
+  auto ingest_healthy_sample = [&](std::uint32_t sequence) {
+    const double now_s = 70.0 + static_cast<double>(sequence) * config.period_s;
+    const auto now_ms = static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
+
+    nx_control::TubeStatus tube;
+    tube.sequence = sequence;
+    tube.dmmc_time_ms = now_ms;
+    tube.receive_time_s = now_s;
+    controller.ingest_tube_status(tube);
+
+    nx_control::ChassisState chassis;
+    chassis.sequence = sequence;
+    chassis.chassis_time_ms = now_ms;
+    chassis.receive_time_s = now_s;
+    chassis.ttl_ms = 100;
+    controller.ingest_chassis_state(chassis);
+
+    nx_control::VisionMeasurement vision;
+    vision.frame_id = sequence;
+    vision.status = nx_control::VisionStatus::Measured;
+    vision.ball_confidence = vision.tube_confidence = 1.0;
+    vision.capture_time_ms = now_ms;
+    vision.has_capture_time = true;
+    vision.receive_time_s = now_s;
+    controller.ingest_vision(vision);
+    return now_s;
+  };
+
+  nx_control::ControlOutput output;
+  for (std::uint32_t sequence = 1; sequence <= 10; ++sequence) {
+    output = controller.tick(ingest_healthy_sample(sequence));
+  }
+  const double theta_before_hold_rad = output.command.theta_cmd_rad;
+  check(theta_before_hold_rad > 0.0,
+        "controller has a nonzero command before entering HoldTarget deadband");
+
+  controller.configure_task(nx_control::TaskMode::HoldTarget, 0.0, true);
+  output = controller.tick(ingest_healthy_sample(11));
+  check(controller.task_manager().target_hold_deadband_active() &&
+            output.reason == "hold_deadband" &&
+            output.command.control_state == nx_control::TaskState::HoldTarget,
+        "controller enters HoldTarget deadband without changing the wire control state");
+  check(output.command.theta_cmd_rad > 0.0 &&
+            output.command.theta_cmd_rad < theta_before_hold_rad &&
+            theta_before_hold_rad - output.command.theta_cmd_rad <=
+                config.theta_rate_limit_rad_s * config.period_s + 1e-12,
+        "HoldTarget deadband returns theta toward zero through the 2 degree per second limiter");
+
+  for (std::uint32_t sequence = 12; sequence <= 30; ++sequence) {
+    output = controller.tick(ingest_healthy_sample(sequence));
+  }
+  check(std::abs(output.command.theta_cmd_rad) < 1e-12 &&
+            output.reason == "hold_deadband",
+        "HoldTarget deadband settles theta at zero without resuming MPC corrections");
 }
 
 void test_contest3_chassis_gate() {
@@ -633,6 +722,7 @@ int main() {
   test_task_manager();
   test_controller_safety();
   test_controller_angle_limit();
+  test_controller_hold_deadband();
   test_contest3_chassis_gate();
   test_contest3_waiting_holds_beam();
   if (failures != 0) {

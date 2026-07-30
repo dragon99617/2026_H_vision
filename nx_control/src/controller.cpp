@@ -17,7 +17,8 @@ NxController::NxController(const ControlConfig& config, std::unique_ptr<QpSolver
     : config_(config),
       observer_(config),
       chassis_sync_(config),
-      mpc_(config, std::move(solver)) {}
+      mpc_(config, std::move(solver)),
+      task_manager_(config) {}
 
 void NxController::configure_task(TaskMode mode, double target_m, bool start_immediately,
                                   bool start_on_chassis_event) {
@@ -170,6 +171,7 @@ ControlOutput NxController::tick(double now_s) {
   output.reference = task_manager_.update(now_s, output.estimate, chassis);
   const bool contest3_waiting_for_start =
       task_manager_.mode() == TaskMode::Contest3 && task_manager_.state() == TaskState::Idle;
+  const bool target_hold_deadband = task_manager_.target_hold_deadband_active();
   std::vector<double> acceleration_forecast =
       chassis_sync_.acceleration_reference_forecast(now_s, config_.horizon, config_.period_s);
   std::vector<ReferencePoint> reference = task_manager_.reference_horizon(config_.horizon);
@@ -201,7 +203,8 @@ ControlOutput NxController::tick(double now_s) {
   }
 
   double requested_u = feedforward;
-  if (!force_safe_feedforward && !dmmc_stale && task_manager_.state() != TaskState::Idle) {
+  if (!force_safe_feedforward && !dmmc_stale && task_manager_.state() != TaskState::Idle &&
+      !target_hold_deadband) {
     const std::array<double, 4> mpc_state{output.estimate.position_m,
                                           output.estimate.velocity_m_s,
                                           output.estimate.disturbance_m_s2, actual_u};
@@ -235,6 +238,13 @@ ControlOutput NxController::tick(double now_s) {
           0.0, 1.0);
       requested_u = feedforward + correction_scale * (requested_u - feedforward);
     }
+  }
+
+  if (target_hold_deadband) {
+    requested_u = 0.0;
+    solver_failures_ = 0;
+    first_solver_failure_s_ = -1.0;
+    if (!output.request_stop) output.reason = "hold_deadband";
   }
 
   if (!contest3_waiting_for_start &&

@@ -98,6 +98,9 @@ ControlConfig load_config(const std::string& path) {
   number("velocity_scale_m_s", config.velocity_scale_m_s);
   number("input_scale_m_s2", config.input_scale_m_s2);
   number("delta_input_scale_m_s2", config.delta_input_scale_m_s2);
+  number("hold_enter_position_error_m", config.hold_enter_position_error_m);
+  number("hold_enter_velocity_m_s", config.hold_enter_velocity_m_s);
+  number("hold_exit_position_error_m", config.hold_exit_position_error_m);
   number("slack_weight", config.slack_weight);
   number("measurement_sigma_m", config.measurement_sigma_m);
   number("predicted_min_confidence", config.predicted_min_confidence);

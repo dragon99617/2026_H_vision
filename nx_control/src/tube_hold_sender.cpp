@@ -251,7 +251,7 @@ int main(int argc, char** argv) {
     std::uint64_t sent_frames = 0;
 
     std::cerr << (options.dry_run ? "dry-run" : "sending") << " tube-control-v3 at 50 Hz"
-              << " state=HOLD(1) theta=+20cdeg rate_limit=500cdeg/s ttl=200ms"
+              << " state=HOLD(1) theta=+20cdeg rate_limit=200cdeg/s ttl=200ms"
               << " first_flags=0x"
               << (options.clear_faults_on_first_frame ? "03" : "01") << '\n';
 
@@ -276,7 +276,7 @@ int main(int argc, char** argv) {
       command.source_frame_id = id;
       command.nx_time_ms = nx_time_ms();
       command.theta_cmd_cdeg = 20;
-      command.theta_rate_limit_cdeg_s = 500;
+      command.theta_rate_limit_cdeg_s = 200;
       command.ttl_ms = 200;
       command.control_state = 1;
       command.flags =

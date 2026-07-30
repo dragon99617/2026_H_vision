@@ -8,6 +8,8 @@ namespace nx_control {
 
 class TaskManager {
  public:
+  explicit TaskManager(const ControlConfig& config = ControlConfig{});
+
   void configure(TaskMode mode, double target_m, bool start_immediately,
                  bool start_on_chassis_event = true);
   void start(double now_s);
@@ -20,6 +22,7 @@ class TaskManager {
   TaskState state() const { return state_; }
   TaskMode mode() const { return mode_; }
   bool static_sequence_complete() const { return static_stage_ >= 2; }
+  bool target_hold_deadband_active() const { return target_hold_deadband_active_; }
   double target_m() const { return current_reference_.position_m; }
 
  private:
@@ -36,6 +39,10 @@ class TaskManager {
   std::uint16_t previous_events_ = 0;
   bool armed_ = false;
   bool start_on_chassis_event_ = true;
+  bool target_hold_deadband_active_ = false;
+  double hold_enter_position_error_m_ = 0.004;
+  double hold_enter_velocity_m_s_ = 0.015;
+  double hold_exit_position_error_m_ = 0.008;
 };
 
 }  // namespace nx_control

@@ -4,6 +4,11 @@
 
 namespace nx_control {
 
+TaskManager::TaskManager(const ControlConfig& config)
+    : hold_enter_position_error_m_(config.hold_enter_position_error_m),
+      hold_enter_velocity_m_s_(config.hold_enter_velocity_m_s),
+      hold_exit_position_error_m_(config.hold_exit_position_error_m) {}
+
 bool TaskManager::is_static_sequence() const {
   return mode_ == TaskMode::StaticSequence || mode_ == TaskMode::Contest3;
 }
@@ -23,6 +28,7 @@ void TaskManager::configure(TaskMode mode, double target_m, bool start_immediate
   previous_events_ = 0;
   armed_ = true;
   start_on_chassis_event_ = start_on_chassis_event;
+  target_hold_deadband_active_ = false;
   state_ = TaskState::Idle;
   current_reference_ = ReferencePoint{};
   if (start_immediately) start(0.0);
@@ -33,6 +39,7 @@ void TaskManager::start(double now_s) {
   task_started_s_ = now_s;
   stable_since_s_ = -1.0;
   static_stage_ = 0;
+  target_hold_deadband_active_ = false;
   switch (mode_) {
     case TaskMode::StaticSequence:
     case TaskMode::Contest3:
@@ -61,9 +68,13 @@ void TaskManager::start(double now_s) {
 void TaskManager::stop() {
   state_ = TaskState::Idle;
   current_reference_ = ReferencePoint{};
+  target_hold_deadband_active_ = false;
 }
 
-void TaskManager::force_safe(bool fault) { state_ = fault ? TaskState::Fault : TaskState::Safe; }
+void TaskManager::force_safe(bool fault) {
+  state_ = fault ? TaskState::Fault : TaskState::Safe;
+  target_hold_deadband_active_ = false;
+}
 
 ReferencePoint TaskManager::update(double now_s, const ObserverState& estimate,
                                    const ChassisState* chassis) {
@@ -110,6 +121,21 @@ ReferencePoint TaskManager::update(double now_s, const ObserverState& estimate,
         state_ = requested_target_m_ == 0.0 ? TaskState::HoldCenter : TaskState::HoldTarget;
         break;
     }
+  }
+
+  if (state_ == TaskState::HoldTarget) {
+    const double position_error =
+        std::abs(estimate.position_m - current_reference_.position_m);
+    if (target_hold_deadband_active_) {
+      if (position_error > hold_exit_position_error_m_) {
+        target_hold_deadband_active_ = false;
+      }
+    } else if (position_error < hold_enter_position_error_m_ &&
+               std::abs(estimate.velocity_m_s) < hold_enter_velocity_m_s_) {
+      target_hold_deadband_active_ = true;
+    }
+  } else {
+    target_hold_deadband_active_ = false;
   }
   return current_reference_;
 }
