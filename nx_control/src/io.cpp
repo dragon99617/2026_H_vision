@@ -225,6 +225,8 @@ ControlConfig load_config(const std::string& path) {
          config.task3_braking_deceleration_m_s2);
   number("task3_early_brake_position_m",
          config.task3_early_brake_position_m);
+  number("task3_positive_reached_position_m",
+         config.task3_positive_reached_position_m);
   number("task3_friction_rolling_enter_velocity_m_s",
          config.task3_friction_rolling_enter_velocity_m_s);
   number("task3_friction_stationary_enter_velocity_m_s",
@@ -295,6 +297,8 @@ ControlConfig load_config(const std::string& path) {
         config.task3_braking_deceleration_m_s2 > 0.0 &&
         config.task3_early_brake_position_m > 0.0 &&
         config.task3_early_brake_position_m < 0.05 &&
+        config.task3_positive_reached_position_m > 0.0 &&
+        config.task3_positive_reached_position_m < 0.05 &&
         config.task3_friction_stationary_enter_velocity_m_s >= 0.0 &&
         config.task3_friction_rolling_enter_velocity_m_s >
             config.task3_friction_stationary_enter_velocity_m_s &&

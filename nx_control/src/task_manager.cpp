@@ -237,6 +237,18 @@ ReferencePoint TaskManager::update(double now_s, const ObserverState& estimate,
       segment_clock_started_ = true;
     }
     current_reference_ = evaluate_segment(now_s);
+    if (mode_ == TaskMode::Contest3 && static_stage_ == 0 &&
+        estimate.position_m >
+            config_.task3_positive_reached_position_m) {
+      settle_position_ok_ = true;
+      settle_velocity_ok_ = true;
+      settle_theta_ok_ = true;
+      stable_since_s_ = -1.0;
+      settle_elapsed_s_ = 0.0;
+      static_stage_ = 1;
+      begin_static_segment(now_s, current_reference_, -0.05);
+      return current_reference_;
+    }
     settle_position_ok_ =
         std::abs(estimate.position_m - segment_target_m_) <=
         config_.task3_settle_position_error_m;

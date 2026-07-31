@@ -228,7 +228,8 @@ struct ControlConfig {
   double task3_friction_blend_time_s = 0.20;
   double task3_friction_breakaway_timeout_s = 0.75;
   double task3_braking_deceleration_m_s2 = 0.080;
-  double task3_early_brake_position_m = 0.030;
+  double task3_early_brake_position_m = 0.040;
+  double task3_positive_reached_position_m = 0.040;
   double task3_friction_rolling_enter_velocity_m_s = 0.010;
   double task3_friction_stationary_enter_velocity_m_s = 0.005;
   double task3_friction_disable_position_error_m = 0.0025;

@@ -502,38 +502,26 @@ void test_task_manager() {
             moving_preview[0].velocity_m_s > 0.0,
         "Task 3 horizon samples future trajectory points instead of copying one target");
 
-  state = nx_control::ObserverState{0.0399, 0.0, 0.0};
-  task.update(5.10, state, nullptr, &tube, true);
-  task.update(5.70, state, nullptr, &tube, true);
-  check(task.task3_stage() == 0 && !task.settle_position_ok(),
-        "Task 3 does not switch outside the 10 mm position band");
-
-  state = nx_control::ObserverState{0.05, 0.0051, 0.0};
-  task.update(6.00, state, nullptr, &tube, true);
-  task.update(6.60, state, nullptr, &tube, true);
-  check(task.task3_stage() == 0 && !task.settle_velocity_ok(),
-        "Task 3 does not switch above 5 mm/s");
-
-  state.velocity_m_s = 0.0;
+  state = nx_control::ObserverState{0.0400, 0.050, 0.0};
   tube.theta_actual_rad =
       config.task3_theta_bias_rad +
       config.task3_settle_theta_tolerance_rad + 1e-4;
-  task.update(6.90, state, nullptr, &tube, false);
-  task.update(7.50, state, nullptr, &tube, false);
-  check(task.task3_stage() == 0 &&
-            std::abs(task.settle_elapsed_s()) < 1e-12,
-        "Task 3 cannot advance while DMMC/vision feedback is stale");
+  task.update(5.10, state, nullptr, &tube, true);
+  check(task.task3_stage() == 0,
+        "Task 3 does not count exactly +4.0 cm as exceeding the threshold");
 
+  state.position_m = 0.0401;
   const nx_control::ReferencePoint switch_reference =
-      task.update(7.80, state, nullptr, &tube, true);
+      task.update(5.20, state, nullptr, &tube, false);
   check(task.task3_stage() == 1 &&
+            task.settle_position_ok() &&
+            task.settle_velocity_ok() &&
             task.settle_theta_ok() &&
             std::abs(task.settle_elapsed_s()) < 1e-12 &&
             std::abs(task.target_m() + 0.05) < 1e-12 &&
-            std::abs(switch_reference.position_m - 0.05) < 1e-12 &&
-            std::abs(switch_reference.velocity_m_s) < 1e-12 &&
-            std::abs(switch_reference.acceleration_m_s2) < 1e-12,
-        "Task 3 switches immediately at +5 cm without angle or dwell constraints");
+            std::abs(switch_reference.position_m -
+                     previous.position_m) < 0.05,
+        "Task 3 counts >+4 cm immediately without speed, angle, feedback, or dwell requirements");
   const auto return_preview = task.reference_horizon(1);
   check(!return_preview.empty() &&
             std::abs(return_preview.front().position_m - 0.05) < 1e-5 &&
@@ -541,6 +529,7 @@ void test_task_manager() {
         "Task 3 return preview begins smoothly and brakes to its endpoint");
 
   state.position_m = -0.05;
+  state.velocity_m_s = 0.0;
   tube.theta_actual_rad =
       config.task3_theta_bias_rad +
       config.task3_settle_theta_tolerance_rad + 1e-4;
@@ -1235,6 +1224,7 @@ void test_controller_task3_position_early_braking() {
   config.solver_deadline_ms = 1000.0;
   config.innovation_gate_sigma = 1000.0;
   config.measurement_sigma_m = 1e-6;
+  config.task3_positive_reached_position_m = 0.049;
   nx_control::NxController controller(config, std::make_unique<ZeroSolver>());
   controller.reset(300.0);
   controller.configure_task(nx_control::TaskMode::Contest3, 0.0, true);
@@ -1283,7 +1273,7 @@ void test_controller_task3_position_early_braking() {
     }
   }
   check(!braked_before_threshold && saw_braking_after_threshold,
-        "Task 3 starts active reverse braking at measured +3.0 cm");
+        "Task 3 starts active reverse braking at measured +4.0 cm");
 }
 
 void test_csv_task3_diagnostics() {
