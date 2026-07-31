@@ -164,6 +164,7 @@ struct ControlOutput {
   bool settle_velocity_ok = false;
   bool settle_theta_ok = false;
   double settle_elapsed_ms = 0.0;
+  bool task3_early_braking = false;
   double u_command_m_s2 = 0.0;
   double theta_mpc_rad = 0.0;
   double theta_bias_rad = 0.0;
@@ -214,9 +215,9 @@ struct ControlConfig {
   double task3_reference_max_velocity_m_s = 0.030;
   double task3_reference_max_acceleration_m_s2 = 0.060;
   double task3_reference_max_jerk_m_s3 = 0.300;
-  double task3_settle_position_error_m = 0.004;
+  double task3_settle_position_error_m = 0.010;
   double task3_settle_velocity_m_s = 0.005;
-  double task3_settle_dwell_s = 0.500;
+  double task3_settle_dwell_s = 0.0;
   double task3_settle_theta_tolerance_rad =
       0.2 * 3.14159265358979323846 / 180.0;
   double task3_theta_bias_rad = -0.15 * 3.14159265358979323846 / 180.0;
@@ -227,6 +228,7 @@ struct ControlConfig {
   double task3_friction_blend_time_s = 0.20;
   double task3_friction_breakaway_timeout_s = 0.75;
   double task3_braking_deceleration_m_s2 = 0.080;
+  double task3_early_brake_position_m = 0.030;
   double task3_friction_rolling_enter_velocity_m_s = 0.010;
   double task3_friction_stationary_enter_velocity_m_s = 0.005;
   double task3_friction_disable_position_error_m = 0.0025;

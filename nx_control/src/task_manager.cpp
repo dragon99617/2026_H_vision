@@ -242,8 +242,10 @@ ReferencePoint TaskManager::update(double now_s, const ObserverState& estimate,
         config_.task3_settle_position_error_m;
     settle_velocity_ok_ =
         std::abs(estimate.velocity_m_s) <= config_.task3_settle_velocity_m_s;
+    const bool require_theta_settle =
+        mode_ == TaskMode::Contest3 && static_stage_ != 0;
     settle_theta_ok_ =
-        mode_ != TaskMode::Contest3 ||
+        !require_theta_settle ||
         (feedback_valid && tube_status != nullptr &&
          std::abs(tube_status->theta_actual_rad -
                   config_.task3_theta_bias_rad) <=

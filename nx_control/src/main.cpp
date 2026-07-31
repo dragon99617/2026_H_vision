@@ -326,6 +326,8 @@ int main(int argc, char** argv) {
                     << " ref=" << output.reference.position_m * 100.0 << "cm"
                     << " theta=" << output.command.theta_cmd_rad * 180.0 / 3.14159265358979323846
                     << "deg mpc=" << output.mpc_solve_ms << "ms"
+                    << " early_brake="
+                    << (output.task3_early_braking ? 1 : 0)
                     << " flags=0x" << std::hex << static_cast<int>(output.command.flags) << std::dec
                     << " reason=" << output.reason << '\n';
           next_report = now + 1.0;

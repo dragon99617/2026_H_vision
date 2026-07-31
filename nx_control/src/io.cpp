@@ -223,6 +223,8 @@ ControlConfig load_config(const std::string& path) {
          config.task3_friction_breakaway_timeout_s);
   number("task3_braking_deceleration_m_s2",
          config.task3_braking_deceleration_m_s2);
+  number("task3_early_brake_position_m",
+         config.task3_early_brake_position_m);
   number("task3_friction_rolling_enter_velocity_m_s",
          config.task3_friction_rolling_enter_velocity_m_s);
   number("task3_friction_stationary_enter_velocity_m_s",
@@ -291,6 +293,8 @@ ControlConfig load_config(const std::string& path) {
         config.task3_friction_blend_time_s > 0.0 &&
         config.task3_friction_breakaway_timeout_s > 0.0 &&
         config.task3_braking_deceleration_m_s2 > 0.0 &&
+        config.task3_early_brake_position_m > 0.0 &&
+        config.task3_early_brake_position_m < 0.05 &&
         config.task3_friction_stationary_enter_velocity_m_s >= 0.0 &&
         config.task3_friction_rolling_enter_velocity_m_s >
             config.task3_friction_stationary_enter_velocity_m_s &&
@@ -422,6 +426,7 @@ bool CsvLogger::open(const std::string& path) {
              "dmmc_controller_state,safety_latched,safety_event_id,last_stop_reason,"
              "task3_stage,planned_x_m,planned_v_m_s,planned_a_m_s2,"
              "settle_position_ok,settle_velocity_ok,settle_theta_ok,settle_elapsed_ms,"
+             "task3_early_braking,"
              "theta_mpc_deg,theta_bias_deg,theta_friction_deg,theta_command_deg,"
              "friction_mode,friction_direction,theta_actual_deg,"
              "x_m,v_m_s,d_m_s2,x_ref_m,u_cmd_m_s2,"
@@ -455,6 +460,7 @@ void CsvLogger::write(double now_s, const ControlOutput& output, const TubeStatu
           << ',' << (output.settle_velocity_ok ? 1 : 0)
           << ',' << (output.settle_theta_ok ? 1 : 0)
           << ',' << output.settle_elapsed_ms
+          << ',' << (output.task3_early_braking ? 1 : 0)
           << ',' << output.theta_mpc_rad * kRadiansToDegrees
           << ',' << output.theta_bias_rad * kRadiansToDegrees
           << ',' << output.theta_friction_rad * kRadiansToDegrees

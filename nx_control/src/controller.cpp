@@ -35,6 +35,9 @@ void NxController::start_task(double now_s) {
   previous_theta_command_rad_ = 0.0;
   previous_model_compensation_rad_ = 0.0;
   previous_model_compensation_active_ = false;
+  task3_early_brake_stage_ = -1;
+  task3_early_braking_active_ = false;
+  task3_early_braking_done_ = false;
   friction_compensator_.reset();
   solver_failures_ = 0;
   first_solver_failure_s_ = -1.0;
@@ -58,6 +61,9 @@ void NxController::reset(double now_s) {
   previous_theta_command_rad_ = 0.0;
   previous_model_compensation_rad_ = 0.0;
   previous_model_compensation_active_ = false;
+  task3_early_brake_stage_ = -1;
+  task3_early_braking_active_ = false;
+  task3_early_braking_done_ = false;
   friction_compensator_.reset();
   solver_failures_ = 0;
   first_solver_failure_s_ = -1.0;
@@ -422,12 +428,50 @@ ControlOutput NxController::tick(double now_s,
       task_manager_.mode() == TaskMode::Contest3 &&
       (task_manager_.state() == TaskState::StaticMove ||
        task_manager_.state() == TaskState::HoldTarget);
+  const int task3_stage = task_manager_.task3_stage();
+  const bool task3_move_active =
+      task3_compensation_active &&
+      task_manager_.state() == TaskState::StaticMove &&
+      (task3_stage == 0 || task3_stage == 1);
+  if (!task3_move_active) {
+    task3_early_brake_stage_ = -1;
+    task3_early_braking_active_ = false;
+    task3_early_braking_done_ = false;
+  } else {
+    if (task3_stage != task3_early_brake_stage_) {
+      task3_early_brake_stage_ = task3_stage;
+      task3_early_braking_active_ = false;
+      task3_early_braking_done_ = false;
+    }
+    const int motion_direction = task3_stage == 0 ? 1 : -1;
+    if (!task3_early_braking_active_ &&
+        !task3_early_braking_done_ &&
+        motion_direction * output.estimate.position_m >=
+            config_.task3_early_brake_position_m) {
+      task3_early_braking_active_ = true;
+    }
+    if (task3_early_braking_active_) {
+      const double forward_velocity_m_s =
+          motion_direction * output.estimate.velocity_m_s;
+      if (forward_velocity_m_s <= config_.task3_settle_velocity_m_s) {
+        task3_early_braking_active_ = false;
+        task3_early_braking_done_ = true;
+      } else {
+        requested_u =
+            -static_cast<double>(motion_direction) *
+            config_.task3_braking_deceleration_m_s2 /
+            config_.rolling_lambda;
+        requested_u = rate_limit_mpc_and_clamp(requested_u);
+      }
+    }
+  }
   const double target_position_error_m =
       task_manager_.target_m() - output.estimate.position_m;
   const FrictionCompensation friction = friction_compensator_.update(
       now_s, task3_compensation_active, target_position_error_m,
       output.estimate.velocity_m_s, requested_u,
-      output.reference.velocity_m_s);
+      task3_early_braking_active_ ? 0.0
+                                  : output.reference.velocity_m_s);
   if (friction.target_deadband) requested_u = 0.0;
 
   const double theta_mpc_rad =
@@ -452,6 +496,7 @@ ControlOutput NxController::tick(double now_s,
   output.theta_friction_rad = theta_friction_rad;
   output.friction_mode = friction.mode;
   output.friction_direction = friction.direction;
+  output.task3_early_braking = task3_early_braking_active_;
   output.solver_failures = solver_failures_;
   output.safety_latched = safety_latched_;
   output.safety_event_id = safety_event_id_;

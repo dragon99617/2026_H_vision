@@ -75,6 +75,9 @@ class NxController {
   double previous_theta_command_rad_ = 0.0;
   double previous_model_compensation_rad_ = 0.0;
   bool previous_model_compensation_active_ = false;
+  int task3_early_brake_stage_ = -1;
+  bool task3_early_braking_active_ = false;
+  bool task3_early_braking_done_ = false;
   int solver_failures_ = 0;
   double first_solver_failure_s_ = -1.0;
   bool safety_latched_ = false;

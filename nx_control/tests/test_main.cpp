@@ -502,11 +502,11 @@ void test_task_manager() {
             moving_preview[0].velocity_m_s > 0.0,
         "Task 3 horizon samples future trajectory points instead of copying one target");
 
-  state = nx_control::ObserverState{0.0459, 0.0, 0.0};
+  state = nx_control::ObserverState{0.0399, 0.0, 0.0};
   task.update(5.10, state, nullptr, &tube, true);
   task.update(5.70, state, nullptr, &tube, true);
   check(task.task3_stage() == 0 && !task.settle_position_ok(),
-        "Task 3 does not switch outside the 4 mm position band");
+        "Task 3 does not switch outside the 10 mm position band");
 
   state = nx_control::ObserverState{0.05, 0.0051, 0.0};
   task.update(6.00, state, nullptr, &tube, true);
@@ -518,29 +518,22 @@ void test_task_manager() {
   tube.theta_actual_rad =
       config.task3_theta_bias_rad +
       config.task3_settle_theta_tolerance_rad + 1e-4;
-  task.update(6.90, state, nullptr, &tube, true);
-  task.update(7.50, state, nullptr, &tube, true);
-  check(task.task3_stage() == 0 && !task.settle_theta_ok(),
-        "Task 3 does not switch before actual tube angle returns to bias");
-
-  tube.theta_actual_rad = config.task3_theta_bias_rad;
-  task.update(7.80, state, nullptr, &tube, false);
-  task.update(8.40, state, nullptr, &tube, false);
-  check(task.task3_stage() == 0 && task.settle_theta_ok() == false,
+  task.update(6.90, state, nullptr, &tube, false);
+  task.update(7.50, state, nullptr, &tube, false);
+  check(task.task3_stage() == 0 &&
+            std::abs(task.settle_elapsed_s()) < 1e-12,
         "Task 3 cannot advance while DMMC/vision feedback is stale");
 
-  task.update(8.70, state, nullptr, &tube, true);
-  task.update(9.19, state, nullptr, &tube, true);
-  check(task.task3_stage() == 0,
-        "Task 3 requires the complete 500 ms settle dwell");
   const nx_control::ReferencePoint switch_reference =
-      task.update(9.21, state, nullptr, &tube, true);
+      task.update(7.80, state, nullptr, &tube, true);
   check(task.task3_stage() == 1 &&
+            task.settle_theta_ok() &&
+            std::abs(task.settle_elapsed_s()) < 1e-12 &&
             std::abs(task.target_m() + 0.05) < 1e-12 &&
             std::abs(switch_reference.position_m - 0.05) < 1e-12 &&
             std::abs(switch_reference.velocity_m_s) < 1e-12 &&
             std::abs(switch_reference.acceleration_m_s2) < 1e-12,
-        "Task 3 starts the return segment only after strict settling without a reference step");
+        "Task 3 switches immediately at +5 cm without angle or dwell constraints");
   const auto return_preview = task.reference_horizon(1);
   check(!return_preview.empty() &&
             std::abs(return_preview.front().position_m - 0.05) < 1e-5 &&
@@ -548,13 +541,20 @@ void test_task_manager() {
         "Task 3 return preview begins smoothly and brakes to its endpoint");
 
   state.position_m = -0.05;
+  tube.theta_actual_rad =
+      config.task3_theta_bias_rad +
+      config.task3_settle_theta_tolerance_rad + 1e-4;
   task.update(15.50, state, nullptr, &tube, true);
-  task.update(16.01, state, nullptr, &tube, true);
+  check(!task.static_sequence_complete() && !task.settle_theta_ok(),
+        "Task 3 final -5 cm stage still requires actual tube angle settling");
+
+  tube.theta_actual_rad = config.task3_theta_bias_rad;
+  task.update(15.60, state, nullptr, &tube, true);
   check(task.static_sequence_complete() &&
             task.state() == nx_control::TaskState::HoldTarget &&
             std::abs(task.target_m() + 0.05) < 1e-12 &&
             task.target_hold_deadband_active(),
-        "contest task 3 holds -5 cm after the second strict stable period");
+        "contest task 3 holds -5 cm immediately after all final conditions pass");
 
   state.position_m = -0.044;
   state.velocity_m_s = 0.050;
@@ -1230,6 +1230,62 @@ void test_controller_task3_friction_and_protocol() {
         "DMMC stale safety path bypasses all Task 3 bias and friction compensation");
 }
 
+void test_controller_task3_position_early_braking() {
+  nx_control::ControlConfig config;
+  config.solver_deadline_ms = 1000.0;
+  config.innovation_gate_sigma = 1000.0;
+  config.measurement_sigma_m = 1e-6;
+  nx_control::NxController controller(config, std::make_unique<ZeroSolver>());
+  controller.reset(300.0);
+  controller.configure_task(nx_control::TaskMode::Contest3, 0.0, true);
+
+  nx_control::ControlOutput output;
+  double feedback_theta_rad = 0.0;
+  bool braked_before_threshold = false;
+  bool saw_braking_after_threshold = false;
+  for (std::uint32_t sequence = 1; sequence <= 50; ++sequence) {
+    const double now_s = 300.0 + sequence * config.period_s;
+    const auto now_ms =
+        static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
+
+    nx_control::TubeStatus tube;
+    tube.sequence = sequence;
+    tube.dmmc_time_ms = now_ms;
+    tube.theta_actual_rad = feedback_theta_rad;
+    tube.receive_time_s = now_s;
+    controller.ingest_tube_status(tube);
+
+    nx_control::VisionMeasurement vision;
+    vision.frame_id = sequence;
+    vision.status = nx_control::VisionStatus::Measured;
+    vision.position_m =
+        sequence <= 5U
+            ? 0.0
+            : static_cast<double>(sequence - 5U) * 0.001;
+    vision.ball_confidence = vision.tube_confidence = 1.0;
+    vision.capture_time_ms = now_ms;
+    vision.has_capture_time = true;
+    vision.receive_time_s = now_s;
+    controller.ingest_vision(vision);
+
+    output = controller.tick(now_s);
+    feedback_theta_rad = output.command.theta_cmd_rad;
+    if (output.estimate.position_m <
+        config.task3_early_brake_position_m - 0.001) {
+      braked_before_threshold =
+          braked_before_threshold || output.task3_early_braking;
+    }
+    if (output.estimate.position_m >=
+        config.task3_early_brake_position_m) {
+      saw_braking_after_threshold =
+          saw_braking_after_threshold ||
+          (output.task3_early_braking && output.theta_mpc_rad < 0.0);
+    }
+  }
+  check(!braked_before_threshold && saw_braking_after_threshold,
+        "Task 3 starts active reverse braking at measured +3.0 cm");
+}
+
 void test_csv_task3_diagnostics() {
   char path[] = "/tmp/nx-control-csv-XXXXXX";
   const int temporary_fd = ::mkstemp(path);
@@ -1260,10 +1316,11 @@ void test_csv_task3_diagnostics() {
   std::string row;
   std::getline(stream, header);
   std::getline(stream, row);
-  const std::array<const char*, 16> required_fields{
+  const std::array<const char*, 17> required_fields{
       "task3_stage",       "planned_x_m",       "planned_v_m_s",
       "planned_a_m_s2",    "settle_position_ok", "settle_velocity_ok",
-      "settle_theta_ok",    "settle_elapsed_ms", "theta_mpc_deg",
+      "settle_theta_ok",    "settle_elapsed_ms", "task3_early_braking",
+      "theta_mpc_deg",
       "theta_bias_deg",     "theta_friction_deg", "theta_command_deg",
       "friction_mode",      "friction_direction", "theta_actual_deg",
       "vision_capture_age_ms"};
@@ -1296,6 +1353,7 @@ int main() {
   test_contest3_chassis_gate();
   test_contest3_waiting_holds_beam();
   test_controller_task3_friction_and_protocol();
+  test_controller_task3_position_early_braking();
   test_csv_task3_diagnostics();
   if (failures != 0) {
     std::cerr << failures << " test(s) failed\n";
