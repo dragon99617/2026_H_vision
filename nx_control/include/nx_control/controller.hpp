@@ -1,14 +1,13 @@
 #pragma once
 
 #include "nx_control/friction_compensator.hpp"
-#include "nx_control/mpc.hpp"
 #include "nx_control/observer.hpp"
+#include "nx_control/pid.hpp"
 #include "nx_control/task_manager.hpp"
 #include "nx_control/types.hpp"
 
 #include <cstdint>
 #include <limits>
-#include <memory>
 #include <optional>
 #include <string>
 
@@ -16,8 +15,7 @@ namespace nx_control {
 
 class NxController {
  public:
-  explicit NxController(const ControlConfig& config,
-                        std::unique_ptr<QpSolver> solver = nullptr);
+  explicit NxController(const ControlConfig& config);
 
   void configure_task(TaskMode mode, double target_m, bool start_immediately,
                       bool start_on_chassis_event = true);
@@ -30,16 +28,13 @@ class NxController {
   void reset(double now_s);
 
   const DelayedKalmanObserver& observer() const { return observer_; }
+  const BallPid& pid() const { return pid_; }
   const TaskManager& task_manager() const { return task_manager_; }
-  const char* mpc_backend_name() const { return mpc_.backend_name(); }
 
  private:
   double model_u_from_actual_theta(double theta_actual_rad) const;
-  double rate_limit_mpc_and_clamp(double requested_u);
   double rate_limit_final_angle(double requested_theta_rad,
                                 double rate_limit_rad_s) const;
-  double fallback_command(const ObserverState& estimate, const ReferencePoint& reference,
-                          double feedforward) const;
   bool contest_uses_camera_feedback_only() const;
   double chassis_acceleration_for_control(double now_s) const;
   bool hold_prediction_crosses_soft_boundary(const ObserverState& estimate,
@@ -54,7 +49,7 @@ class NxController {
   TimestampUnwrapper vision_clock_;
   RemoteClockSynchronizer dmmc_clock_;
   RemoteClockSynchronizer chassis_clock_;
-  BallMpc mpc_;
+  BallPid pid_;
   TaskManager task_manager_;
   Task3FrictionCompensator friction_compensator_;
   TubeStatus tube_status_;
@@ -77,7 +72,7 @@ class NxController {
   double visual_position_filter_time_s_ = 0.0;
   bool visual_position_filter_initialized_ = false;
   std::uint32_t command_id_ = 0;
-  double previous_mpc_u_ = 0.0;
+  double previous_applied_u_ = 0.0;
   double previous_theta_command_rad_ = 0.0;
   double previous_model_compensation_rad_ = 0.0;
   bool previous_model_compensation_active_ = false;
@@ -86,8 +81,8 @@ class NxController {
   bool task3_early_braking_done_ = false;
   bool task3_reverse_balance_active_ = false;
   bool task3_reverse_balance_done_ = false;
-  int solver_failures_ = 0;
-  double first_solver_failure_s_ = -1.0;
+  double inner_angle_warning_since_s_ = -1.0;
+  double inner_angle_safe_since_s_ = -1.0;
   bool safety_latched_ = false;
   bool safety_fault_latched_ = false;
   bool clear_comm_warning_pending_ = false;

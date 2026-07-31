@@ -7,29 +7,27 @@ DMMC 管道实际角和底盘状态，输出 `tube-control-v3`，不控制车轮
 
 - `tube-v2/v3`、`tube-control-v3`、`tube-status-v3`、`chassis-state-v1` 固定帧、
   CRC、流式拆包、粘包/噪声重同步；
-- 对需要底盘状态的通用/兼容任务提供实际加速度低延迟滤波和
-  `a_ref + jerk_ref·t` 预测域前馈；赛题任务4/5/6明确禁用这条底盘运动输入；
+- 对需要底盘状态的通用/兼容任务提供实际加速度低延迟滤波和当前加速度前馈；
+  赛题任务4/5/6明确禁用这条底盘运动输入；
 - 状态 `[x, x_dot, d]` 的卡尔曼观测器、置信度动态测量噪声、3σ门限和至少
   250 ms历史；v3迟到测量在曝光时刻更新后重放；
-- 状态 `[x, x_dot, d, u_actual]`、执行机构一阶动态、增量输入决策的40步 MPC；
-  角度、角速度硬约束与球位置软约束均直接进入QP；
-- OSQP 0.6.x生产后端，以及无需外部求解器、仅供构建和回归测试的稠密ADMM后端；
-- 单次QP失败使用上一最优序列移位，连续失败切换前馈+状态反馈备用控制，持续失败
-  请求停车；视觉丢失100～250 ms先进入0° HOLD软保护，超过250 ms或软边界存在
+- 所有活动任务共用带前馈、积分分离和反算抗饱和的位置外环PID；NX输出目标管角，
+  MC02继续执行现有机构逆解、角度拟合和电机/管角内环；
+- 管角硬限幅、角速度限制、内环角差监控和轻量安全预测；视觉丢失100～250 ms
+  先进入0° HOLD软保护，超过250 ms或软边界存在
   当前/预测风险时进入锁存SAFE；底盘、DMMC超时和±11.5 cm边界也会触发安全锁存；
-- Task3 使用全预测域可预览的五次连续轨迹完成 `0→+5→-5 cm`，端点采用位置、
-  速度和实测管角联合稳定判据；任务4/5/6使用视觉球位置反馈的MPC保持中心或指定
+- Task3 使用五次连续轨迹完成 `0→+5→-5 cm`，端点采用位置、速度和实测管角
+  联合稳定判据；任务4/5/6使用视觉球位置反馈的PID保持中心或指定
   位置，通用 `auto` 模式仍支持底盘阶段切换；
 - Task3 根据实测静摩擦死区进行带滞回的静/动摩擦前馈，突破后平滑降补偿，
-  目标死区只保留 `-0.15°` 平衡偏置；MPC、观察器与绝对管角命令使用分离的角度分量；
-- 每周期 CSV（含预测位置序列）、离线重放和误差/饱和/求解耗时统计。
+  目标死区只保留 `-0.15°` 平衡偏置；PID、观察器与绝对管角命令使用分离的角度分量；
+- 每周期CSV、离线重放和位置误差、PID分量、饱和率、内环角差统计。
 
 线协议的唯一字节级定义见 [PROTOCOL.md](PROTOCOL.md)。
 
 ## 构建和测试
 
-项目内已提供为当前 Jetson NX（ARM64）编译的 OSQP 0.6.3 静态库；默认构建会直接
-启用它，不需要安装系统动态库：
+构建只需要C++17、Eigen3和线程库，不再依赖OSQP或其他在线优化求解器：
 
 ```bash
 cd /home/d/2026ti/2026H/ball_yolo26s_nx/nx_control
@@ -42,21 +40,10 @@ cd build && ctest --output-on-failure
 Jetson CPU优化；若在一台机器上交叉构建给不同CPU运行，可加
 `-DNX_CONTROL_NATIVE_OPTIMIZATION=OFF`。
 
-MPC在控制循环启动前完成OSQP预热，并缓存不随状态变化的Hessian和约束矩阵；
-稳态周期只更新梯度与上下界。默认仍允许最多250次迭代，使用0.0125收敛容差，
-每10次迭代检查一次终止条件和自适应rho，避免用过低的迭代上限换取表面耗时。
-
-配置中的 `require_osqp=true` 会让误用非 OSQP 版本的程序在启动时直接报错；正常
-启动还会打印 `MPC backend: osqp (required)`。若只为移植或回归测试而明确需要
-稠密 ADMM 后端，可使用：
-
-```bash
-cmake -S . -B build-dense -DNX_CONTROL_USE_OSQP=OFF
-```
-
-在其他架构上可将自行编译的 OSQP 0.6.x 安装前缀通过
-`-DNX_CONTROL_OSQP_ROOT=...` 传入。项目按 OSQP 0.6.x C API 编译；不要在未完成
-API 适配时直接替换成 1.x。
+启动会打印 `Controller: cascaded PID`。外环使用观测器位置/速度，控制律为
+`u=Kp·ex+Ki·I+Kd·ev+a_chassis+a_ref/lambda-Kd_dist·d/lambda`，再由
+`theta=atan(u/g)`换算目标管角。积分只在误差不超过3 cm时累积，角度限幅、限速
+以及Task3专项覆盖都会通过反算反馈到积分器。
 
 无硬件烟测：
 
@@ -66,7 +53,7 @@ API 适配时直接替换成 1.x。
 python3 tools/analyze_log.py logs/smoke.csv
 ```
 
-`--dry-run` 不打开串口或UDP，只注入健康零输入，用来检查周期、MPC和日志，不是
+`--dry-run` 不打开串口或UDP，只注入健康零输入，用来检查周期、PID和日志，不是
 硬件验收。
 
 ## 固定 HOLD 通信工具
@@ -127,12 +114,12 @@ python3 run.py --no-serial --protocol tube-v3 \
   管角、反馈状态、轨迹完成状态或稳定时间。若仍过冲到`+5.0 cm`外，则把反向
   减速度由`0.08 m/s²`轻度增强到`0.10 m/s²`。返程速度达到`-2.0 cm/s`后，
   先以`4°/s`直接把实测管角拉回平衡偏置；进入平衡偏置±0.2°后，该阶段只退出
-  一次并恢复普通`2°/s`限速，由MPC继续按位置和速度调整。返回`-5 cm`时达到
+  一次并恢复普通`2°/s`限速，由PID继续按位置和速度调整。返回`-5 cm`时达到
   `-4.0 cm`执行一次主动反向提前制动；最终位置误差不超过±1.0 cm、速度不超过
   5 mm/s且实际管角处于平衡偏置±0.2°内后立即完成。参考轨迹上限为`7 cm/s`、
   `10 cm/s²`和`30 cm/s³`，两段均从静止开始的保守参考总时长约`4.87 s`；
 - `--task 45`：赛题要求4和5，车辆行驶阶段始终保持中心 `O`（`4`和`5`
-  也是该 task 的别名）；MPC只使用摄像头更新的球状态和摆杆反馈，不使用底盘
+  也是该 task 的别名）；PID只使用摄像头更新的球状态和摆杆反馈，不使用底盘
   速度、实测/参考加速度或jerk；
 - `--task 6 --target-cm N`：赛题要求6，车辆行驶阶段保持指定位置 `N` cm，
   控制输入与任务4/5相同，不使用底盘运动状态；
@@ -203,21 +190,20 @@ python3 tools/analyze_log.py replay-output.csv --json replay-metrics.json
 ```
 
 正式测试应同时保留视觉侧 `--position-csv`、控制CSV和视频。控制日志中的
-`vision_age_ms`、`mpc_ms`、`prediction_m`、实际管道角、底盘阶段和故障字段足以
+`vision_age_ms`、PID各分量、饱和状态、实际管道角、底盘阶段和故障字段足以
 复现观测与控制决策。Task3还记录`task3_stage`、三阶一致的`planned_*`参考、
-三个`settle_*`判据及保持时间、`theta_mpc/bias/friction/command_deg`、
+三个`settle_*`判据及保持时间、`theta_pid/bias/friction/command_deg`、
 `friction_mode/direction`和`theta_actual_deg`，可直接定位换向、突破、滚动降补偿
-及最终死区。`mpc_ms`进一步拆分为`qp_build_ms`、`qp_setup_ms`、
-`qp_update_ms`和`qp_backend_solve_ms`，`qp_iteration_us`记录OSQP单次ADMM迭代
-耗时。日志还直接记录`wire_control_state`、`wire_flags`、
+及最终死区。日志记录`pid_p/i/d/ff/disturbance`、未限幅/实际应用控制量、积分冻结、
+积分限幅、输出饱和、`inner_angle_error_rad`和内环告警。日志还直接记录`wire_control_state`、`wire_flags`、
 `dmmc_controller_state`、`safety_latched`、`safety_event_id`和
 `last_stop_reason`；安全锁存/解除行会立即flush，不依赖每秒一次的终端摘要。
 
 ## 上车前必须实测的参数
 
-默认值来自实施计划，只能作为首轮低风险参数。依次完成并写回配置：执行机构
-`actuator_tau_s/actuator_delay_s`，视觉测量噪声与端到端延迟，有效
-`rolling_lambda`，底盘加速度正方向和滤波时常。随后按空载角度、小球静止、
+默认值来自实施计划，只能作为首轮低风险参数。依次完成并写回配置：MC02空载
+管角跟踪误差、`pid_kp/ki/kd`、视觉测量噪声与端到端延迟、有效
+`rolling_lambda`、底盘加速度正方向和滤波时常。随后按空载角度、小球静止、
 静态移动、低速直线、AB段、低速整圈、30秒整圈的顺序放开测试。
 
 视觉实测位置在进入延迟观测器前使用
@@ -225,7 +211,7 @@ python3 tools/analyze_log.py replay-output.csv --json replay-metrics.json
 时间戳跳变或超过软丢帧时长后自动复位。未经滤波的位置仍独立用于越界保护，
 进入软边界内侧1 cm的保护带时也会自动旁路滤波。
 
-当前代码已通过 OSQP 0.6.3 软件构建、单测和离线重放；相机、DMMC及底盘实机接口
+当前代码提供PID单测和离线重放；相机、DMMC及底盘实机接口
 仍需按上述顺序验收，不能用软件测试结果代替真机验收。
 
 NX的摆杆命令硬限幅为`±4.0°`，普通角速度限制为`2°/s`，Task3返程平衡阶段
@@ -235,8 +221,10 @@ NX的摆杆命令硬限幅为`±4.0°`，普通角速度限制为`2°/s`，Task3
 配套MC02固件应使用`default_rate_limit_deg_s=2.0`、
 `minimum_rate_limit_deg_s=0.5`、`maximum_rate_limit_deg_s=4.0`和
 `acceleration_limit_deg_s2=5.0`，但这些固件参数不属于本NX工程。
+NX比较MC02回传的`theta_reference`与`theta_actual`：角差超过1°持续0.2秒时
+请求底盘减速，超过2°持续0.5秒时锁存SAFE。该监控不改变机构逆解或拟合参数。
 
 `HoldTarget`在位置误差小于4 mm且估计速度小于15 mm/s时进入带滞回的静止区；
-位置误差超过8 mm才退出。非Task3静止区内暂停MPC追踪，管道角度按2°/s限制缓慢
+位置误差超过8 mm才退出。非Task3静止区内暂停PID追踪，管道角度按2°/s限制缓慢
 回到0°。Task3在更严格的2.5 mm、5 mm/s死区内撤销方向摩擦补偿并回到
 `-0.15°`平衡偏置，避免反复突破静摩擦形成极限环。

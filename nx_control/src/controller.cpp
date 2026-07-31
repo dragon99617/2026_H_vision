@@ -14,16 +14,19 @@ bool sequence_is_newer(std::uint32_t value, std::uint32_t previous) {
 
 }  // namespace
 
-NxController::NxController(const ControlConfig& config, std::unique_ptr<QpSolver> solver)
+NxController::NxController(const ControlConfig& config)
     : config_(config),
       observer_(config),
       chassis_sync_(config),
-      mpc_(config, std::move(solver)),
+      pid_(config),
       task_manager_(config),
       friction_compensator_(config) {}
 
 void NxController::configure_task(TaskMode mode, double target_m, bool start_immediately,
                                   bool start_on_chassis_event) {
+  pid_.reset();
+  inner_angle_warning_since_s_ = -1.0;
+  inner_angle_safe_since_s_ = -1.0;
   task_manager_.configure(mode, target_m, start_immediately, start_on_chassis_event);
 }
 
@@ -31,7 +34,7 @@ void NxController::start_task(double now_s) {
   safety_latched_ = false;
   safety_fault_latched_ = false;
   clear_comm_warning_pending_ = true;
-  previous_mpc_u_ = 0.0;
+  previous_applied_u_ = 0.0;
   previous_theta_command_rad_ = 0.0;
   previous_model_compensation_rad_ = 0.0;
   previous_model_compensation_active_ = false;
@@ -42,8 +45,9 @@ void NxController::start_task(double now_s) {
   task3_reverse_balance_done_ = false;
   visual_position_filter_initialized_ = false;
   friction_compensator_.reset();
-  solver_failures_ = 0;
-  first_solver_failure_s_ = -1.0;
+  inner_angle_warning_since_s_ = -1.0;
+  inner_angle_safe_since_s_ = -1.0;
+  pid_.reset();
   task_manager_.start(now_s);
 }
 
@@ -63,7 +67,7 @@ void NxController::reset(double now_s) {
   filtered_visual_position_m_ = 0.0;
   visual_position_filter_time_s_ = 0.0;
   visual_position_filter_initialized_ = false;
-  previous_mpc_u_ = 0.0;
+  previous_applied_u_ = 0.0;
   previous_theta_command_rad_ = 0.0;
   previous_model_compensation_rad_ = 0.0;
   previous_model_compensation_active_ = false;
@@ -73,8 +77,9 @@ void NxController::reset(double now_s) {
   task3_reverse_balance_active_ = false;
   task3_reverse_balance_done_ = false;
   friction_compensator_.reset();
-  solver_failures_ = 0;
-  first_solver_failure_s_ = -1.0;
+  inner_angle_warning_since_s_ = -1.0;
+  inner_angle_safe_since_s_ = -1.0;
+  pid_.reset();
   safety_latched_ = false;
   safety_fault_latched_ = false;
   clear_comm_warning_pending_ = false;
@@ -105,8 +110,9 @@ void NxController::ingest_vision(VisionMeasurement measurement) {
       const std::int32_t frame_delta =
           static_cast<std::int32_t>(measurement.frame_id - previous_frame_id);
       const double frame_estimate =
-          v2_capture_time_s_ + static_cast<double>(std::max(1, frame_delta)) /
-                                    config_.vision_frame_rate_hz;
+          v2_capture_time_s_ +
+          static_cast<double>(std::max<std::int32_t>(1, frame_delta)) /
+                                     config_.vision_frame_rate_hz;
       v2_capture_time_s_ = frame_estimate + 0.05 * (arrival_estimate - frame_estimate);
     }
     measurement.capture_time_s = v2_capture_time_s_;
@@ -156,7 +162,7 @@ void NxController::ingest_vision(VisionMeasurement measurement) {
     const double actual_u =
         have_tube_status_
             ? model_u_from_actual_theta(tube_status_.theta_actual_rad)
-            : previous_mpc_u_;
+            : previous_applied_u_;
     const double acceleration =
         chassis_acceleration_for_control(measurement.receive_time_s);
     observer_.predict(measurement.capture_time_s, actual_u, acceleration);
@@ -179,7 +185,7 @@ void NxController::ingest_tube_status(const TubeStatus& status) {
   const double previous_u =
       have_tube_status_
           ? model_u_from_actual_theta(tube_status_.theta_actual_rad)
-          : previous_mpc_u_;
+          : previous_applied_u_;
   observer_.predict(synchronized.sample_time_s, previous_u,
                     chassis_acceleration_for_control(status.receive_time_s));
   tube_status_ = synchronized;
@@ -200,7 +206,7 @@ void NxController::ingest_chassis_state(const ChassisState& state) {
   const double actual_u =
       have_tube_status_
           ? model_u_from_actual_theta(tube_status_.theta_actual_rad)
-          : previous_mpc_u_;
+          : previous_applied_u_;
   observer_.predict(synchronized.sample_time_s, actual_u,
                     chassis_acceleration_for_control(state.receive_time_s));
   last_chassis_sequence_ = state.sequence;
@@ -216,20 +222,6 @@ double NxController::model_u_from_actual_theta(double theta_actual_rad) const {
   return kGravity * std::tan(dynamic_theta_rad);
 }
 
-double NxController::rate_limit_mpc_and_clamp(double requested_u) {
-  double requested_theta_rad = std::atan2(requested_u, kGravity);
-  const double previous_theta_rad = std::atan2(previous_mpc_u_, kGravity);
-  const double max_step_rad =
-      config_.theta_rate_limit_rad_s * config_.period_s;
-  requested_theta_rad =
-      std::clamp(requested_theta_rad, previous_theta_rad - max_step_rad,
-                 previous_theta_rad + max_step_rad);
-  requested_theta_rad =
-      std::clamp(requested_theta_rad, -config_.theta_limit_rad,
-                 config_.theta_limit_rad);
-  return kGravity * std::tan(requested_theta_rad);
-}
-
 double NxController::rate_limit_final_angle(
     double requested_theta_rad, double rate_limit_rad_s) const {
   const double max_step_rad =
@@ -239,15 +231,6 @@ double NxController::rate_limit_final_angle(
                  previous_theta_command_rad_ - max_step_rad,
                  previous_theta_command_rad_ + max_step_rad),
       -config_.theta_limit_rad, config_.theta_limit_rad);
-}
-
-double NxController::fallback_command(const ObserverState& estimate,
-                                      const ReferencePoint& reference,
-                                      double feedforward) const {
-  return feedforward - config_.fallback_kp * (estimate.position_m - reference.position_m) -
-         config_.fallback_kd * (estimate.velocity_m_s - reference.velocity_m_s) -
-         config_.fallback_disturbance_gain * estimate.disturbance_m_s2 /
-             config_.rolling_lambda;
 }
 
 bool NxController::contest_uses_camera_feedback_only() const {
@@ -306,7 +289,7 @@ ControlOutput NxController::tick(double now_s,
   const double actual_u =
       have_tube_status_
           ? model_u_from_actual_theta(tube_status_.theta_actual_rad)
-          : previous_mpc_u_;
+          : previous_applied_u_;
   observer_.predict(now_s, actual_u, chassis_acceleration);
   last_tick_s_ = now_s;
 
@@ -343,17 +326,6 @@ ControlOutput NxController::tick(double now_s,
   const bool contest3_waiting_for_start =
       task_manager_.mode() == TaskMode::Contest3 && task_manager_.state() == TaskState::Idle;
   const bool target_hold_deadband = task_manager_.target_hold_deadband_active();
-  std::vector<double> acceleration_forecast(
-      static_cast<std::size_t>(config_.horizon), 0.0);
-  if (!camera_feedback_only) {
-    acceleration_forecast = chassis_sync_.acceleration_reference_forecast(
-        now_s, config_.horizon, config_.period_s);
-  }
-  std::vector<ReferencePoint> reference = task_manager_.reference_horizon(config_.horizon);
-  const double feedforward = acceleration_forecast.empty()
-                                 ? 0.0
-                                 : acceleration_forecast.front() +
-                                       output.reference.acceleration_m_s2 / config_.rolling_lambda;
 
   const bool vision_soft_hold =
       !contest3_waiting_for_start &&
@@ -380,72 +352,76 @@ ControlOutput NxController::tick(double now_s,
     output.reason = "dmmc_stale_or_fault";
   }
 
-  double requested_u = feedforward;
-  if (!force_safe_feedforward && !dmmc_stale && task_manager_.state() != TaskState::Idle &&
-      !target_hold_deadband) {
-    const std::array<double, 4> mpc_state{output.estimate.position_m,
-                                          output.estimate.velocity_m_s,
-                                          output.estimate.disturbance_m_s2, actual_u};
-    const MpcResult result =
-        mpc_.solve(mpc_state, previous_mpc_u_, reference,
-                   acceleration_forecast);
-    output.mpc_solve_ms = result.solve_time_ms;
-    output.qp_build_ms = result.qp_build_time_ms;
-    output.qp_setup_ms = result.qp_setup_time_ms;
-    output.qp_update_ms = result.qp_update_time_ms;
-    output.qp_backend_solve_ms = result.qp_backend_solve_time_ms;
-    output.qp_iteration_us =
-        result.iterations > 0
-            ? 1000.0 * result.qp_backend_solve_time_ms /
-                  static_cast<double>(result.iterations)
-            : 0.0;
-    output.max_predicted_slack_m = result.max_slack_m;
-    output.solver_iterations = result.iterations;
-    output.predicted_position_m = result.predicted_position;
-    if (result.solved) {
-      solver_failures_ = 0;
-      first_solver_failure_s_ = -1.0;
-      requested_u = result.command_m_s2;
-    } else {
-      if (solver_failures_++ == 0) first_solver_failure_s_ = now_s;
-      const auto shifted = mpc_.shift_last_solution();
-      requested_u = shifted.empty() ? fallback_command(output.estimate, output.reference, feedforward)
-                                    : shifted.front();
-      output.reason = result.timed_out ? "mpc_deadline" : "mpc_failure";
-    }
-    if (solver_failures_ >= config_.fallback_after_failures ||
-        result.solve_time_ms > config_.solver_deadline_ms) {
-      output.used_fallback = true;
-      requested_u = fallback_command(output.estimate, output.reference, feedforward);
-    }
+  const bool pid_active =
+      !force_safe_feedforward && !dmmc_stale &&
+      task_manager_.state() != TaskState::Idle;
+  if (!pid_active) pid_.reset();
+  output.pid = pid_.calculate(output.estimate, output.reference,
+                              chassis_acceleration,
+                              pid_active && !target_hold_deadband);
+  double requested_u = pid_active ? output.pid.unsaturated_m_s2 : 0.0;
+  if (pid_active && !target_hold_deadband) {
     if (vision_age_s > config_.vision_decay_start_s) {
       const double correction_scale = std::clamp(
           (config_.vision_loss_hold_s - vision_age_s) /
               std::max(1e-6, config_.vision_loss_hold_s - config_.vision_decay_start_s),
           0.0, 1.0);
-      requested_u = feedforward + correction_scale * (requested_u - feedforward);
+      requested_u = output.pid.feedforward_m_s2 +
+                    correction_scale *
+                        (requested_u - output.pid.feedforward_m_s2);
     }
   }
 
   if (target_hold_deadband) {
     requested_u = 0.0;
-    solver_failures_ = 0;
-    first_solver_failure_s_ = -1.0;
     if (!output.request_stop) output.reason = "hold_deadband";
   }
 
+  const bool projected_soft_boundary =
+      !contest3_waiting_for_start &&
+      hold_prediction_crosses_soft_boundary(
+          output.estimate, actual_u, chassis_acceleration,
+          config_.vision_loss_safe_s);
   if (!contest3_waiting_for_start &&
-      (solver_failures_ >= config_.stop_after_failures ||
-       (first_solver_failure_s_ >= 0.0 &&
-        now_s - first_solver_failure_s_ >= config_.stop_after_failure_s))) {
-    output.request_stop = true;
-    output.used_fallback = true;
-    output.reason = "persistent_solver_failure";
-  }
-  if (!contest3_waiting_for_start &&
-      (std::abs(output.estimate.position_m) > config_.position_soft_limit_m - 0.010 ||
-       output.max_predicted_slack_m > 0.0001)) {
+      (std::abs(output.estimate.position_m) >
+           config_.position_soft_limit_m - 0.010 ||
+       projected_soft_boundary)) {
     output.request_slowdown = true;
+  }
+
+  if (!dmmc_stale) {
+    output.inner_angle_error_rad =
+        tube_status_.theta_reference_rad - tube_status_.theta_actual_rad;
+    const double abs_inner_error = std::abs(output.inner_angle_error_rad);
+    if (abs_inner_error > config_.inner_angle_warning_rad) {
+      if (inner_angle_warning_since_s_ < 0.0) {
+        inner_angle_warning_since_s_ = now_s;
+      }
+    } else {
+      inner_angle_warning_since_s_ = -1.0;
+    }
+    if (abs_inner_error > config_.inner_angle_safe_rad) {
+      if (inner_angle_safe_since_s_ < 0.0) inner_angle_safe_since_s_ = now_s;
+    } else {
+      inner_angle_safe_since_s_ = -1.0;
+    }
+    output.inner_angle_warning =
+        inner_angle_warning_since_s_ >= 0.0 &&
+        now_s - inner_angle_warning_since_s_ >=
+            config_.inner_angle_warning_dwell_s;
+    if (output.inner_angle_warning) {
+      output.request_slowdown = true;
+      if (output.reason.empty()) output.reason = "inner_angle_tracking_warning";
+    }
+    if (inner_angle_safe_since_s_ >= 0.0 &&
+        now_s - inner_angle_safe_since_s_ >=
+            config_.inner_angle_safe_dwell_s) {
+      output.request_stop = true;
+      output.reason = "inner_angle_tracking_error";
+    }
+  } else {
+    inner_angle_warning_since_s_ = -1.0;
+    inner_angle_safe_since_s_ = -1.0;
   }
   const bool outside_soft_boundary =
       std::abs(output.estimate.position_m) >= config_.position_soft_limit_m ||
@@ -479,9 +455,9 @@ ControlOutput NxController::tick(double now_s,
   }
 
   const bool force_zero_command =
-      safety_latched_ || vision_soft_hold || dmmc_stale || contest3_waiting_for_start;
-  requested_u =
-      force_zero_command ? 0.0 : rate_limit_mpc_and_clamp(requested_u);
+      safety_latched_ || vision_soft_hold || dmmc_stale ||
+      contest3_waiting_for_start || !pid_active;
+  if (force_zero_command) requested_u = 0.0;
 
   const bool task3_compensation_active =
       !force_zero_command && !output.request_stop &&
@@ -576,7 +552,6 @@ ControlOutput NxController::tick(double now_s,
     requested_u =
         -static_cast<double>(task3_braking_direction) *
         task3_braking_deceleration_m_s2 / config_.rolling_lambda;
-    requested_u = rate_limit_mpc_and_clamp(requested_u);
   }
   const double target_position_error_m =
       task_manager_.target_m() - output.estimate.position_m;
@@ -588,14 +563,14 @@ ControlOutput NxController::tick(double now_s,
       task3_braking_active ? 0.0 : output.reference.velocity_m_s);
   if (friction.target_deadband) requested_u = 0.0;
 
-  const double theta_mpc_rad =
+  const double theta_pid_rad =
       force_zero_command ? 0.0 : std::atan2(requested_u, kGravity);
   const double theta_bias_rad =
       task3_compensation_active ? config_.task3_theta_bias_rad : 0.0;
   const double theta_friction_rad =
       task3_compensation_active ? friction.theta_friction_rad : 0.0;
   const double desired_theta_rad =
-      theta_mpc_rad + theta_bias_rad + theta_friction_rad;
+      theta_pid_rad + theta_bias_rad + theta_friction_rad;
   const double theta_rate_limit_rad_s =
       task3_reverse_balance_active_
           ? config_.task3_reverse_balance_rate_limit_rad_s
@@ -606,13 +581,31 @@ ControlOutput NxController::tick(double now_s,
           : rate_limit_final_angle(desired_theta_rad,
                                    theta_rate_limit_rad_s);
 
-  previous_mpc_u_ = requested_u;
+  const double applied_dynamic_theta_rad =
+      theta_command_rad - theta_bias_rad - theta_friction_rad;
+  const double applied_u =
+      force_zero_command
+          ? 0.0
+          : kGravity * std::tan(applied_dynamic_theta_rad);
+  const bool pid_forced_override =
+      target_hold_deadband || task3_reverse_balance_active_ || task3_braking_active ||
+      friction.target_deadband;
+  if (force_zero_command) {
+    pid_.reset();
+    output.pid = pid_.last_result();
+    output.pid.applied_m_s2 = 0.0;
+    output.pid.integrator_frozen = true;
+  } else {
+    output.pid = pid_.track(applied_u, pid_forced_override);
+  }
+
+  previous_applied_u_ = applied_u;
   previous_theta_command_rad_ = theta_command_rad;
   previous_model_compensation_active_ = task3_compensation_active;
   previous_model_compensation_rad_ =
-      task3_compensation_active ? theta_command_rad - theta_mpc_rad : 0.0;
-  output.u_command_m_s2 = requested_u;
-  output.theta_mpc_rad = theta_mpc_rad;
+      task3_compensation_active ? theta_bias_rad + theta_friction_rad : 0.0;
+  output.u_command_m_s2 = applied_u;
+  output.theta_pid_rad = theta_pid_rad;
   output.theta_bias_rad = theta_bias_rad;
   output.theta_friction_rad = theta_friction_rad;
   output.friction_mode = friction.mode;
@@ -622,7 +615,6 @@ ControlOutput NxController::tick(double now_s,
       task3_positive_overshoot_recovery;
   output.task3_reverse_balance_active =
       task3_reverse_balance_active_;
-  output.solver_failures = solver_failures_;
   output.safety_latched = safety_latched_;
   output.safety_event_id = safety_event_id_;
   output.last_stop_reason = last_stop_reason_;

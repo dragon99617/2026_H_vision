@@ -47,12 +47,6 @@ speed_t baud_flag(int baud) {
   }
 }
 
-bool parse_bool(const std::string& value) {
-  if (value == "true" || value == "1" || value == "yes") return true;
-  if (value == "false" || value == "0" || value == "no") return false;
-  throw std::invalid_argument("invalid boolean: " + value);
-}
-
 std::string trim(std::string value) {
   const auto first = value.find_first_not_of(" \t\r\n");
   if (first == std::string::npos) return {};
@@ -176,27 +170,27 @@ ControlConfig load_config(const std::string& path) {
     const auto found = values.find(key);
     if (found != values.end()) target = std::stod(found->second);
   };
-  auto integer = [&](const char* key, int& target) {
-    const auto found = values.find(key);
-    if (found != values.end()) target = std::stoi(found->second);
-  };
-  auto boolean = [&](const char* key, bool& target) {
-    const auto found = values.find(key);
-    if (found != values.end()) target = parse_bool(found->second);
-  };
   number("period_s", config.period_s);
-  number("actuator_tau_s", config.actuator_tau_s);
-  number("actuator_delay_s", config.actuator_delay_s);
   number("rolling_lambda", config.rolling_lambda);
-  integer("horizon", config.horizon);
   number("theta_limit_rad", config.theta_limit_rad);
   number("theta_rate_limit_rad_s", config.theta_rate_limit_rad_s);
   number("position_soft_limit_m", config.position_soft_limit_m);
   number("position_safe_limit_m", config.position_safe_limit_m);
-  number("position_scale_m", config.position_scale_m);
-  number("velocity_scale_m_s", config.velocity_scale_m_s);
-  number("input_scale_m_s2", config.input_scale_m_s2);
-  number("delta_input_scale_m_s2", config.delta_input_scale_m_s2);
+  number("pid_kp_s2", config.pid_kp_s2);
+  number("pid_ki_s3", config.pid_ki_s3);
+  number("pid_kd_s_inv", config.pid_kd_s_inv);
+  number("pid_disturbance_gain", config.pid_disturbance_gain);
+  number("pid_integral_output_limit_m_s2",
+         config.pid_integral_output_limit_m_s2);
+  number("pid_integral_enable_error_m",
+         config.pid_integral_enable_error_m);
+  number("pid_anti_windup_gain_s_inv",
+         config.pid_anti_windup_gain_s_inv);
+  number("inner_angle_warning_rad", config.inner_angle_warning_rad);
+  number("inner_angle_safe_rad", config.inner_angle_safe_rad);
+  number("inner_angle_warning_dwell_s",
+         config.inner_angle_warning_dwell_s);
+  number("inner_angle_safe_dwell_s", config.inner_angle_safe_dwell_s);
   number("hold_enter_position_error_m", config.hold_enter_position_error_m);
   number("hold_enter_velocity_m_s", config.hold_enter_velocity_m_s);
   number("hold_exit_position_error_m", config.hold_exit_position_error_m);
@@ -247,7 +241,6 @@ ControlConfig load_config(const std::string& path) {
          config.task3_friction_disable_velocity_m_s);
   number("task3_friction_request_acceleration_m_s2",
          config.task3_friction_request_acceleration_m_s2);
-  number("slack_weight", config.slack_weight);
   number("measurement_sigma_m", config.measurement_sigma_m);
   number("vision_position_filter_tau_s",
          config.vision_position_filter_tau_s);
@@ -269,24 +262,19 @@ ControlConfig load_config(const std::string& path) {
   number("chassis_filter_tau_s", config.chassis_filter_tau_s);
   number("chassis_stale_s", config.chassis_stale_s);
   number("dmmc_stale_s", config.dmmc_stale_s);
-  number("solver_warning_ms", config.solver_warning_ms);
-  number("solver_deadline_ms", config.solver_deadline_ms);
-  integer("fallback_after_failures", config.fallback_after_failures);
-  integer("stop_after_failures", config.stop_after_failures);
-  number("stop_after_failure_s", config.stop_after_failure_s);
-  number("fallback_kp", config.fallback_kp);
-  number("fallback_kd", config.fallback_kd);
-  number("fallback_disturbance_gain", config.fallback_disturbance_gain);
-  boolean("require_osqp", config.require_osqp);
-  integer("qp_max_iterations", config.qp_max_iterations);
-  number("qp_eps_abs", config.qp_eps_abs);
-  number("qp_eps_rel", config.qp_eps_rel);
-  number("qp_rho", config.qp_rho);
-  integer("qp_adaptive_rho_interval", config.qp_adaptive_rho_interval);
-  integer("qp_check_termination_interval",
-          config.qp_check_termination_interval);
-  boolean("qp_scaled_termination", config.qp_scaled_termination);
-  if (!(config.period_s > 0.0 && config.actuator_tau_s > 0.0 && config.horizon > 0 &&
+  if (!(config.period_s > 0.0 && config.rolling_lambda > 0.0 &&
+        config.theta_limit_rad > 0.0 &&
+        config.theta_rate_limit_rad_s > 0.0 &&
+        config.pid_kp_s2 >= 0.0 && config.pid_ki_s3 >= 0.0 &&
+        config.pid_kd_s_inv >= 0.0 &&
+        config.pid_disturbance_gain >= 0.0 &&
+        config.pid_integral_output_limit_m_s2 >= 0.0 &&
+        config.pid_integral_enable_error_m > 0.0 &&
+        config.pid_anti_windup_gain_s_inv >= 0.0 &&
+        config.inner_angle_warning_rad > 0.0 &&
+        config.inner_angle_safe_rad > config.inner_angle_warning_rad &&
+        config.inner_angle_warning_dwell_s >= 0.0 &&
+        config.inner_angle_safe_dwell_s > 0.0 &&
         config.vision_position_filter_tau_s >= 0.0 &&
         config.predicted_min_confidence >= 0.0 && config.predicted_min_confidence <= 1.0 &&
         config.vision_frame_rate_hz > 0.0 &&
@@ -330,11 +318,7 @@ ControlConfig load_config(const std::string& path) {
             config.task3_friction_stationary_enter_velocity_m_s &&
         config.task3_friction_disable_position_error_m > 0.0 &&
         config.task3_friction_disable_velocity_m_s > 0.0 &&
-        config.task3_friction_request_acceleration_m_s2 >= 0.0 &&
-        config.qp_eps_abs > 0.0 && config.qp_eps_rel > 0.0 &&
-        config.qp_rho > 0.0 &&
-        config.qp_adaptive_rho_interval >= 0 &&
-        config.qp_check_termination_interval > 0)) {
+        config.task3_friction_request_acceleration_m_s2 >= 0.0)) {
     throw std::runtime_error("invalid control config limits");
   }
   return config;
@@ -458,15 +442,17 @@ bool CsvLogger::open(const std::string& path) {
              "settle_position_ok,settle_velocity_ok,settle_theta_ok,settle_elapsed_ms,"
              "task3_early_braking,task3_positive_overshoot_recovery,"
              "task3_reverse_balance_active,"
-             "theta_mpc_deg,theta_bias_deg,theta_friction_deg,theta_command_deg,"
+             "theta_pid_deg,theta_bias_deg,theta_friction_deg,theta_command_deg,"
              "friction_mode,friction_direction,theta_actual_deg,"
-             "x_m,v_m_s,d_m_s2,x_ref_m,u_cmd_m_s2,"
+             "x_m,v_m_s,d_m_s2,x_ref_m,position_error_m,velocity_error_m_s,u_cmd_m_s2,"
+             "pid_p_m_s2,pid_i_m_s2,pid_d_m_s2,pid_ff_m_s2,pid_disturbance_m_s2,"
+             "pid_unsaturated_m_s2,pid_applied_m_s2,pid_integrator_frozen,"
+             "pid_integral_limited,pid_saturated,"
              "theta_cmd_rad,theta_actual_rad,motor_position_rad,motor_velocity_rad_s,"
              "motor_torque_nm,a_actual_m_s2,a_ref_m_s2,v_actual_m_s,v_ref_m_s,jerk_ref_m_s3,"
              "track_error_m,track_quality,chassis_events,vision_age_ms,vision_capture_age_ms,"
-             "chassis_age_ms,dmmc_age_ms,mpc_ms,qp_build_ms,qp_setup_ms,qp_update_ms,"
-             "qp_backend_solve_ms,qp_iteration_us,solver_iterations,slack_m,solver_failures,"
-             "fallback,slow,stop,tube_faults,motion_phase,track_segment,reason,prediction_m\n";
+             "chassis_age_ms,dmmc_age_ms,inner_angle_error_rad,inner_angle_warning,"
+             "slow,stop,tube_faults,motion_phase,track_segment,reason\n";
   return true;
 }
 
@@ -494,7 +480,7 @@ void CsvLogger::write(double now_s, const ControlOutput& output, const TubeStatu
           << ',' << (output.task3_early_braking ? 1 : 0)
           << ',' << (output.task3_positive_overshoot_recovery ? 1 : 0)
           << ',' << (output.task3_reverse_balance_active ? 1 : 0)
-          << ',' << output.theta_mpc_rad * kRadiansToDegrees
+          << ',' << output.theta_pid_rad * kRadiansToDegrees
           << ',' << output.theta_bias_rad * kRadiansToDegrees
           << ',' << output.theta_friction_rad * kRadiansToDegrees
           << ',' << output.command.theta_cmd_rad * kRadiansToDegrees
@@ -503,7 +489,15 @@ void CsvLogger::write(double now_s, const ControlOutput& output, const TubeStatu
           << ',' << (tube ? tube->theta_actual_rad * kRadiansToDegrees : 0.0)
           << ',' << output.estimate.position_m << ',' << output.estimate.velocity_m_s << ','
           << output.estimate.disturbance_m_s2 << ',' << output.reference.position_m << ','
-          << output.u_command_m_s2 << ',' << output.command.theta_cmd_rad << ','
+          << output.pid.position_error_m << ',' << output.pid.velocity_error_m_s << ','
+          << output.u_command_m_s2 << ',' << output.pid.proportional_m_s2 << ','
+          << output.pid.integral_m_s2 << ',' << output.pid.derivative_m_s2 << ','
+          << output.pid.feedforward_m_s2 << ',' << output.pid.disturbance_m_s2 << ','
+          << output.pid.unsaturated_m_s2 << ',' << output.pid.applied_m_s2 << ','
+          << (output.pid.integrator_frozen ? 1 : 0) << ','
+          << (output.pid.integral_limited ? 1 : 0) << ','
+          << (output.pid.saturated ? 1 : 0) << ','
+          << output.command.theta_cmd_rad << ','
           << (tube ? tube->theta_actual_rad : 0.0) << ','
           << (tube ? tube->motor_position_rad : 0.0) << ','
           << (tube ? tube->motor_velocity_rad_s : 0.0) << ','
@@ -517,22 +511,13 @@ void CsvLogger::write(double now_s, const ControlOutput& output, const TubeStatu
           << (chassis ? chassis->events : 0) << ',' << output.vision_age_ms
           << ',' << output.vision_capture_age_ms
           << ',' << output.chassis_age_ms << ',' << output.dmmc_age_ms << ','
-          << output.mpc_solve_ms << ',' << output.qp_build_ms << ','
-          << output.qp_setup_ms << ','
-          << output.qp_update_ms << ',' << output.qp_backend_solve_ms << ','
-          << output.qp_iteration_us << ',' << output.solver_iterations << ','
-          << output.max_predicted_slack_m << ','
-          << output.solver_failures << ',' << (output.used_fallback ? 1 : 0) << ','
+          << output.inner_angle_error_rad << ','
+          << (output.inner_angle_warning ? 1 : 0) << ','
           << (output.request_slowdown ? 1 : 0) << ',' << (output.request_stop ? 1 : 0) << ','
           << (tube ? tube->faults : 0) << ','
           << (chassis ? static_cast<int>(chassis->motion_phase) : 0) << ','
           << (chassis ? static_cast<int>(chassis->track_segment) : 0) << ','
-          << output.reason << ',';
-  for (std::size_t index = 0; index < output.predicted_position_m.size(); ++index) {
-    if (index != 0) stream_ << ';';
-    stream_ << output.predicted_position_m[index];
-  }
-  stream_ << '\n';
+          << output.reason << '\n';
   const bool safety_transition =
       !have_safety_state_ || output.safety_latched != last_safety_latched_ ||
       output.safety_event_id != last_safety_event_id_ ||

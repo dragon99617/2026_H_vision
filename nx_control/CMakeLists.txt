@@ -5,14 +5,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(NX_CONTROL_USE_OSQP "Use the OSQP 0.6.x MPC backend" ON)
 option(NX_CONTROL_BUILD_TESTS "Build the dependency-free unit tests" ON)
 option(NX_CONTROL_NATIVE_OPTIMIZATION
        "Tune Release binaries for the Jetson CPU executing the build" ON)
-set(NX_CONTROL_OSQP_ROOT
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/osqp-0.6.3"
-    CACHE PATH "OSQP 0.6.x installation prefix")
-
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 find_package(Threads REQUIRED)
 
@@ -26,7 +21,7 @@ endif()
 add_library(nx_control_core
     src/protocol.cpp
     src/observer.cpp
-    src/mpc.cpp
+    src/pid.cpp
     src/task_manager.cpp
     src/friction_compensator.cpp
     src/controller.cpp
@@ -41,23 +36,6 @@ check_ipo_supported(RESULT NX_CONTROL_IPO_SUPPORTED OUTPUT NX_CONTROL_IPO_ERROR)
 if(NX_CONTROL_IPO_SUPPORTED)
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     set_property(TARGET nx_control_core PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-endif()
-
-if(NX_CONTROL_USE_OSQP)
-    find_path(OSQP_INCLUDE_DIR osqp.h
-        HINTS "${NX_CONTROL_OSQP_ROOT}/include"
-        PATH_SUFFIXES osqp
-        REQUIRED)
-    find_library(OSQP_LIBRARY osqp
-        HINTS "${NX_CONTROL_OSQP_ROOT}/lib"
-        REQUIRED)
-    message(STATUS "MPC backend: OSQP (${OSQP_LIBRARY})")
-    target_sources(nx_control_core PRIVATE src/osqp_solver.cpp)
-    target_include_directories(nx_control_core PRIVATE ${OSQP_INCLUDE_DIR})
-    target_link_libraries(nx_control_core PRIVATE ${OSQP_LIBRARY} ${CMAKE_DL_LIBS})
-    target_compile_definitions(nx_control_core PUBLIC NX_CONTROL_HAS_OSQP=1)
-else()
-    message(WARNING "MPC backend: dense-admm (test-only fallback)")
 endif()
 
 add_executable(ball_nx_control src/main.cpp)

@@ -193,22 +193,6 @@ double ChassisSynchronizer::age_s(double now_s) const {
                       : std::numeric_limits<double>::infinity();
 }
 
-std::vector<double> ChassisSynchronizer::acceleration_reference_forecast(
-    double now_s, int horizon, double period_s) const {
-  std::vector<double> result(static_cast<std::size_t>(std::max(0, horizon)), 0.0);
-  if (!valid(now_s)) return result;
-  for (int index = 0; index < horizon; ++index) {
-    const double lookahead = (index + 1) * period_s;
-    double acceleration = latest_.acceleration_ref_m_s2 + latest_.jerk_ref_m_s3 * lookahead;
-    if (latest_.motion_phase == MotionPhase::Cruise || latest_.motion_phase == MotionPhase::Curve ||
-        latest_.motion_phase == MotionPhase::Stop) {
-      acceleration = latest_.acceleration_ref_m_s2;
-    }
-    result[static_cast<std::size_t>(index)] = std::clamp(acceleration, -0.55, 0.55);
-  }
-  return result;
-}
-
 double ChassisSynchronizer::delay_compensated_actual_acceleration(double now_s) const {
   if (!valid(now_s)) return 0.0;
   const bool steady_phase = latest_.motion_phase == MotionPhase::Stop ||

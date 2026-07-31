@@ -197,8 +197,7 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, signal_handler);
     const nx_control::ControlConfig config = nx_control::load_config(options.config);
     nx_control::NxController controller(config);
-    std::cerr << "MPC backend: " << controller.mpc_backend_name()
-              << (config.require_osqp ? " (required)" : "") << '\n';
+    std::cerr << "Controller: cascaded PID (NX position outer loop, MC02 angle inner loop)\n";
     const double started = nx_control::monotonic_seconds();
     controller.reset(started);
     controller.configure_task(options.task, options.target_m, options.start_immediately,
@@ -333,9 +332,15 @@ int main(int argc, char** argv) {
         if (now >= next_report) {
           std::cerr << "state=" << static_cast<int>(output.command.control_state)
                     << " x=" << output.estimate.position_m * 100.0 << "cm"
-                    << " ref=" << output.reference.position_m * 100.0 << "cm"
-                    << " theta=" << output.command.theta_cmd_rad * 180.0 / 3.14159265358979323846
-                    << "deg mpc=" << output.mpc_solve_ms << "ms"
+                     << " ref=" << output.reference.position_m * 100.0 << "cm"
+                     << " theta=" << output.command.theta_cmd_rad * 180.0 / 3.14159265358979323846
+                     << "deg pid=" << output.pid.proportional_m_s2 << '/'
+                     << output.pid.integral_m_s2 << '/'
+                     << output.pid.derivative_m_s2
+                     << " inner_error="
+                     << output.inner_angle_error_rad * 180.0 /
+                            3.14159265358979323846
+                     << "deg"
                     << " early_brake="
                     << (output.task3_early_braking ? 1 : 0)
                     << " overshoot_recovery="

@@ -320,18 +320,4 @@ ReferencePoint TaskManager::update(double now_s, const ObserverState& estimate,
   return current_reference_;
 }
 
-std::vector<ReferencePoint> TaskManager::reference_horizon(int horizon) const {
-  std::vector<ReferencePoint> result;
-  result.reserve(static_cast<std::size_t>(std::max(0, horizon)));
-  for (int step = 0; step < horizon; ++step) {
-    if (is_static_sequence() && state_ == TaskState::StaticMove) {
-      result.push_back(
-          evaluate_segment(last_update_s_ + (step + 1) * config_.period_s));
-    } else {
-      result.push_back(current_reference_);
-    }
-  }
-  return result;
-}
-
 }  // namespace nx_control

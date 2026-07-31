@@ -57,8 +57,6 @@ class ChassisSynchronizer {
   double age_s(double now_s) const;
   double filtered_actual_acceleration() const { return filtered_acceleration_; }
   double delay_compensated_actual_acceleration(double now_s) const;
-  std::vector<double> acceleration_reference_forecast(double now_s, int horizon,
-                                                       double period_s) const;
   const ChassisState& latest() const { return latest_; }
 
  private:

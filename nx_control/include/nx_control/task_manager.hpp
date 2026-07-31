@@ -3,7 +3,6 @@
 #include "nx_control/types.hpp"
 
 #include <array>
-#include <vector>
 
 namespace nx_control {
 
@@ -20,8 +19,6 @@ class TaskManager {
                         const ChassisState* chassis,
                         const TubeStatus* tube_status = nullptr,
                         bool feedback_valid = false);
-  std::vector<ReferencePoint> reference_horizon(int horizon) const;
-
   TaskState state() const { return state_; }
   TaskMode mode() const { return mode_; }
   bool static_sequence_complete() const { return static_stage_ >= 2; }

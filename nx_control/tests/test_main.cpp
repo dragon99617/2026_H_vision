@@ -1,8 +1,8 @@
 #include "nx_control/controller.hpp"
 #include "nx_control/friction_compensator.hpp"
 #include "nx_control/io.hpp"
-#include "nx_control/mpc.hpp"
 #include "nx_control/observer.hpp"
+#include "nx_control/pid.hpp"
 #include "nx_control/protocol.hpp"
 #include "nx_control/task_manager.hpp"
 
@@ -11,7 +11,6 @@
 #include <cstdint>
 #include <fstream>
 #include <iostream>
-#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -68,54 +67,6 @@ std::vector<std::uint8_t> vision_v3_packet() {
   packet.push_back(static_cast<std::uint8_t>(crc >> 8));
   return packet;
 }
-
-class ZeroSolver final : public nx_control::QpSolver {
- public:
-  nx_control::QpResult solve(const nx_control::QpProblem& problem) override {
-    nx_control::QpResult result;
-    result.solved = true;
-    result.iterations = 1;
-    result.primal = Eigen::VectorXd::Zero(problem.hessian.rows());
-    result.status = "solved";
-    return result;
-  }
-  const char* name() const override { return "zero-test"; }
-};
-
-class LargePositiveSolver final : public nx_control::QpSolver {
- public:
-  nx_control::QpResult solve(const nx_control::QpProblem& problem) override {
-    nx_control::QpResult result;
-    result.solved = true;
-    result.iterations = 1;
-    result.primal = Eigen::VectorXd::Zero(problem.hessian.rows());
-    result.primal(0) = 1000.0;
-    result.status = "solved";
-    return result;
-  }
-  const char* name() const override { return "large-positive-test"; }
-};
-
-class CapturingZeroSolver final : public nx_control::QpSolver {
- public:
-  explicit CapturingZeroSolver(Eigen::VectorXd* gradient)
-      : gradient_(gradient) {}
-
-  nx_control::QpResult solve(const nx_control::QpProblem& problem) override {
-    if (gradient_ != nullptr) *gradient_ = problem.gradient;
-    nx_control::QpResult result;
-    result.solved = true;
-    result.iterations = 1;
-    result.primal = Eigen::VectorXd::Zero(problem.hessian.rows());
-    result.status = "solved";
-    return result;
-  }
-
-  const char* name() const override { return "capturing-zero-test"; }
-
- private:
-  Eigen::VectorXd* gradient_;
-};
 
 void test_protocol() {
   check(nx_control::protocol::crc16_ccitt_false(
@@ -351,13 +302,12 @@ void test_vision_position_filter() {
   filtered_config.vision_position_filter_tau_s = 0.010;
   filtered_config.measurement_sigma_m = 1e-6;
   filtered_config.innovation_gate_sigma = 1e6;
-  nx_control::NxController filtered(
-      filtered_config, std::make_unique<ZeroSolver>());
+  nx_control::NxController filtered(filtered_config);
   filtered.reset(10.0);
 
   nx_control::ControlConfig raw_config = filtered_config;
   raw_config.vision_position_filter_tau_s = 0.0;
-  nx_control::NxController raw(raw_config, std::make_unique<ZeroSolver>());
+  nx_control::NxController raw(raw_config);
   raw.reset(10.0);
 
   auto ingest = [](nx_control::NxController& controller,
@@ -384,8 +334,7 @@ void test_vision_position_filter() {
   check(filtered_position > 0.008 && filtered_position < raw_position - 0.0005,
         "vision position low-pass mildly attenuates a frame-to-frame step");
 
-  nx_control::NxController reset_after_gap(
-      filtered_config, std::make_unique<ZeroSolver>());
+  nx_control::NxController reset_after_gap(filtered_config);
   reset_after_gap.reset(20.0);
   ingest(reset_after_gap, 1U, 20.0, 0.0);
   ingest(reset_after_gap, 2U, 20.20, 0.010);
@@ -434,7 +383,7 @@ void test_persistent_sequence() {
   ::unlink(path);
 }
 
-void test_mpc_constraints() {
+void test_pid_controller() {
   nx_control::ControlConfig config;
   check(std::abs(config.theta_limit_rad -
                  4.0 * 3.14159265358979323846 / 180.0) < 1e-12,
@@ -442,82 +391,69 @@ void test_mpc_constraints() {
   check(std::abs(config.theta_rate_limit_rad_s -
                  2.0 * 3.14159265358979323846 / 180.0) < 1e-12,
         "NX default angle rate limit is 2 degrees per second");
-  check(std::abs(config.position_scale_m - 0.010) < 1e-12 &&
-            std::abs(config.velocity_scale_m_s - 0.010) < 1e-12 &&
-            std::abs(config.input_scale_m_s2 - 0.100) < 1e-12 &&
-            std::abs(config.delta_input_scale_m_s2 - 0.015) < 1e-12,
-        "MPC defaults apply the stronger Task 3 velocity penalty");
-  check(config.horizon == 40,
-        "MPC default horizon previews 0.8 seconds at 20 ms");
+  check(std::abs(config.pid_kp_s2 - 10.0) < 1e-12 &&
+            std::abs(config.pid_ki_s3 - 0.8) < 1e-12 &&
+            std::abs(config.pid_kd_s_inv - 5.0) < 1e-12,
+        "PID defaults use the commissioned conservative starting gains");
   check(std::abs(config.hold_enter_position_error_m - 0.004) < 1e-12 &&
             std::abs(config.hold_enter_velocity_m_s - 0.015) < 1e-12 &&
             std::abs(config.hold_exit_position_error_m - 0.008) < 1e-12,
         "HoldTarget deadband defaults are 4 mm, 15 mm/s, and 8 mm");
-  config.horizon = 12;
-  config.solver_deadline_ms = 1000.0;
-  config.qp_max_iterations = 1000;
-  config.qp_eps_abs = 1e-5;
-  config.qp_eps_rel = 1e-5;
-  nx_control::BallMpc mpc(config);
-  std::vector<nx_control::ReferencePoint> reference(12);
-  std::vector<double> acceleration(12, 0.3);
-  const auto result = mpc.solve({0.03, 0.0, 0.0, 0.0}, 0.0, reference, acceleration);
-  const auto& problem = mpc.last_problem();
-  const double expected_u_limit = nx_control::kGravity * std::tan(config.theta_limit_rad);
-  check(std::abs(problem.lower(config.horizon) +
-                 expected_u_limit / config.input_scale_m_s2) < 1e-12 &&
-            std::abs(problem.upper(config.horizon) -
-                     expected_u_limit / config.input_scale_m_s2) < 1e-12,
-        "MPC input bounds are exactly plus/minus 4.0 degrees");
-#ifdef NX_CONTROL_HAS_OSQP
-  check(result.backend == "osqp", "production build selects the OSQP backend");
-#endif
-  check(result.solved, "MPC solves nominal QP");
-  if (result.solved) {
-    const double u_limit = nx_control::kGravity * std::tan(config.theta_limit_rad) + 1e-5;
-    const double du_limit = nx_control::kGravity *
-                            std::tan(config.theta_rate_limit_rad_s * config.period_s) + 1e-3;
-    double previous = 0.0;
-    for (double command : result.command_sequence) {
-      check(std::abs(command) <= u_limit,
-            "MPC command angle constraint: command=" + std::to_string(command) +
-                " limit=" + std::to_string(u_limit));
-      check(std::abs(command - previous) <= du_limit, "MPC command rate constraint");
-      previous = command;
-    }
-  }
-  const Eigen::MatrixXd cached_hessian = problem.hessian;
-  const Eigen::MatrixXd cached_constraint = problem.constraint;
-  const Eigen::VectorXd first_gradient = problem.gradient;
-  reference[0].position_m = 0.002;
-  mpc.solve({0.02, 0.01, 0.03, 0.04}, result.command_m_s2, reference,
-            acceleration);
-  check((mpc.last_problem().hessian - cached_hessian)
-                    .cwiseAbs()
-                    .maxCoeff() < 1e-12 &&
-            (mpc.last_problem().constraint - cached_constraint)
-                    .cwiseAbs()
-                    .maxCoeff() < 1e-12 &&
-            (mpc.last_problem().gradient - first_gradient)
-                    .cwiseAbs()
-                    .maxCoeff() > 1e-6,
-        "MPC caches invariant Hessian/constraints while rebuilding state-dependent terms");
-}
+  nx_control::BallPid pid(config);
+  nx_control::ObserverState estimate;
+  estimate.position_m = 0.010;
+  estimate.velocity_m_s = 0.020;
+  estimate.disturbance_m_s2 = 0.020;
+  nx_control::ReferencePoint reference;
+  reference.position_m = 0.020;
+  reference.velocity_m_s = 0.030;
+  reference.acceleration_m_s2 = 0.040;
+  const nx_control::PidResult result =
+      pid.calculate(estimate, reference, 0.050, true);
+  check(std::abs(result.position_error_m - 0.010) < 1e-12 &&
+            std::abs(result.velocity_error_m_s - 0.010) < 1e-12,
+        "PID uses reference-minus-estimate position and velocity errors");
+  check(std::abs(result.proportional_m_s2 - 0.100) < 1e-12 &&
+            std::abs(result.integral_m_s2 - 0.00016) < 1e-12 &&
+            std::abs(result.derivative_m_s2 - 0.050) < 1e-12,
+        "PID P/I/D terms use observer velocity instead of differentiating camera position");
+  check(std::abs(result.feedforward_m_s2 -
+                 (0.050 + 0.040 / config.rolling_lambda)) < 1e-12 &&
+            std::abs(result.disturbance_m_s2 +
+                     config.pid_disturbance_gain * 0.020 /
+                         config.rolling_lambda) < 1e-12,
+        "PID retains reference, chassis, and observed-disturbance feedforward");
 
-void test_mpc_actuator_delay() {
-  nx_control::ControlConfig config;
-  config.horizon = 6;
-  config.actuator_delay_s = 2.0 * config.period_s;
-  config.solver_deadline_ms = 1000.0;
-  nx_control::BallMpc mpc(config, std::make_unique<ZeroSolver>());
-  mpc.solve({0.0, 0.0, 0.0, 0.0}, 0.0,
-            std::vector<nx_control::ReferencePoint>(6), std::vector<double>(6));
-  const auto& constraints = mpc.last_problem().constraint;
-  // Positive-position soft constraint for prediction step 1 starts at row 3*N+1.
-  check(constraints.block(3 * config.horizon + 1, 0, 1, config.horizon)
-                .cwiseAbs()
-                .maxCoeff() < 1e-12,
-        "identified pure delay postpones command influence in prediction");
+  const double integral_before_tracking = pid.integral_output_m_s2();
+  const nx_control::PidResult tracked = pid.track(0.0, false);
+  check(tracked.saturated &&
+            pid.integral_output_m_s2() < integral_before_tracking,
+        "PID back-calculation unwinds the integral when the command is limited");
+
+  estimate.position_m = -0.050;
+  reference.position_m = 0.0;
+  const nx_control::PidResult separated =
+      pid.calculate(estimate, reference, 0.0, true);
+  check(separated.integrator_frozen,
+        "PID integral separation freezes integration outside the 3 cm band");
+  pid.reset();
+  check(std::abs(pid.integral_output_m_s2()) < 1e-12,
+        "PID reset removes stored integral state");
+
+  config.pid_integral_output_limit_m_s2 = 0.001;
+  nx_control::BallPid limited_pid(config);
+  estimate = nx_control::ObserverState{};
+  reference = nx_control::ReferencePoint{0.020, 0.0, 0.0};
+  bool reported_integral_limit = false;
+  for (int iteration = 0; iteration < 20; ++iteration) {
+    reported_integral_limit =
+        limited_pid.calculate(estimate, reference, 0.0, true)
+            .integral_limited ||
+        reported_integral_limit;
+  }
+  check(reported_integral_limit &&
+            std::abs(limited_pid.integral_output_m_s2()) <= 0.001 + 1e-12,
+        "PID integral contribution is explicitly clamped and diagnosed");
 }
 
 void test_task_manager() {
@@ -538,7 +474,6 @@ void test_task_manager() {
         "contest task 3 reference starts continuously at the center");
   bool reference_limits_ok = true;
   bool reference_continuity_ok = true;
-  std::vector<nx_control::ReferencePoint> moving_preview;
   constexpr double sample_dt_s = 0.01;
   for (int sample = 1; sample <= 400; ++sample) {
     const nx_control::ReferencePoint point =
@@ -557,19 +492,12 @@ void test_task_manager() {
             config.task3_reference_max_velocity_m_s * sample_dt_s + 1e-6 &&
         std::abs(point.velocity_m_s - previous.velocity_m_s) <=
             config.task3_reference_max_acceleration_m_s2 * sample_dt_s + 1e-6;
-    if (sample == 100) moving_preview = task.reference_horizon(3);
     previous = point;
   }
   check(reference_limits_ok,
         "Task 3 quintic reference respects velocity, acceleration, and jerk limits");
   check(reference_continuity_ok,
         "Task 3 reference position, velocity, and acceleration remain continuous");
-  check(moving_preview.size() == 3U &&
-            moving_preview[0].position_m < moving_preview[1].position_m &&
-            moving_preview[1].position_m < moving_preview[2].position_m &&
-            moving_preview[0].velocity_m_s > 0.0,
-        "Task 3 horizon samples future trajectory points instead of copying one target");
-
   nx_control::TaskManager timed_task(config);
   timed_task.configure(nx_control::TaskMode::Contest3, 0.0, true);
   nx_control::ObserverState tracking_state;
@@ -615,11 +543,12 @@ void test_task_manager() {
             std::abs(switch_reference.position_m -
                      previous.position_m) < 0.05,
         "Task 3 counts >+4 cm immediately without speed, angle, feedback, or dwell requirements");
-  const auto return_preview = task.reference_horizon(1);
-  check(!return_preview.empty() &&
-            std::abs(return_preview.front().position_m - 0.05) < 1e-5 &&
-            return_preview.front().velocity_m_s < 0.0,
-        "Task 3 return preview begins smoothly and brakes to its endpoint");
+  const auto return_reference =
+      task.update(5.20 + config.period_s, state, nullptr, &tube, true);
+  check(std::abs(return_reference.position_m - switch_reference.position_m) <
+                1e-4 &&
+            return_reference.velocity_m_s < 0.0,
+        "Task 3 return reference begins smoothly and heads toward -5 cm");
 
   state.position_m = -0.05;
   state.velocity_m_s = 0.0;
@@ -738,13 +667,13 @@ void test_task3_friction_compensator() {
   result = friction.update(1.30, true, 0.04, -0.020, 0.020, -0.010);
   check(result.mode == nx_control::FrictionMode::RollingPositive &&
             result.direction == 1,
-        "friction direction follows positive MPC braking acceleration");
+        "friction direction follows positive PID/braking acceleration");
 
   friction.reset();
   result = friction.update(1.40, true, -0.008, 0.0, 0.020, 0.0);
   check(result.mode == nx_control::FrictionMode::BreakawayNegative &&
             result.direction == -1,
-        "stationary overshoot follows position error instead of stale MPC direction");
+        "stationary overshoot follows position error instead of stale PID direction");
 
   friction.reset();
   result = friction.update(1.50, true, 0.003, 0.090, 0.020, 0.0);
@@ -797,8 +726,7 @@ void test_task3_friction_compensator() {
 
 void test_controller_safety() {
   nx_control::ControlConfig config;
-  config.solver_deadline_ms = 1000.0;
-  nx_control::NxController controller(config, std::make_unique<ZeroSolver>());
+  nx_control::NxController controller(config);
   controller.reset(10.0);
   controller.configure_task(nx_control::TaskMode::HoldCenter, 0.0, true);
 
@@ -885,8 +813,7 @@ void test_controller_safety() {
 
   nx_control::ControlConfig boundary_config = config;
   boundary_config.innovation_gate_sigma = 20.0;
-  nx_control::NxController boundary_controller(
-      boundary_config, std::make_unique<ZeroSolver>());
+  nx_control::NxController boundary_controller(boundary_config);
   boundary_controller.reset(20.0);
   boundary_controller.configure_task(nx_control::TaskMode::HoldCenter, 0.0, true);
   nx_control::TubeStatus tube;
@@ -926,8 +853,7 @@ void test_controller_safety() {
   nx_control::ControlConfig prediction_config = config;
   prediction_config.innovation_gate_sigma = 1000.0;
   prediction_config.measurement_sigma_m = 1e-6;
-  nx_control::NxController prediction_controller(
-      prediction_config, std::make_unique<ZeroSolver>());
+  nx_control::NxController prediction_controller(prediction_config);
   prediction_controller.reset(30.0);
   prediction_controller.configure_task(nx_control::TaskMode::HoldCenter, 0.0, true);
   auto ingest_prediction_sample = [&](std::uint32_t sequence, double now_s,
@@ -979,8 +905,8 @@ void test_controller_safety() {
 
 void test_controller_angle_limit() {
   nx_control::ControlConfig config;
-  config.solver_deadline_ms = 1000.0;
-  nx_control::NxController controller(config, std::make_unique<LargePositiveSolver>());
+  config.pid_kp_s2 = 10000.0;
+  nx_control::NxController controller(config);
   controller.reset(20.0);
   controller.configure_task(nx_control::TaskMode::HoldCenter, 0.0, true);
 
@@ -1006,6 +932,7 @@ void test_controller_angle_limit() {
     nx_control::VisionMeasurement vision;
     vision.frame_id = sequence;
     vision.status = nx_control::VisionStatus::Measured;
+    vision.position_m = -0.050;
     vision.ball_confidence = vision.tube_confidence = 1.0;
     vision.capture_time_ms = now_ms;
     vision.has_capture_time = true;
@@ -1022,7 +949,7 @@ void test_controller_angle_limit() {
   }
 
   check(std::abs(output.command.theta_cmd_rad - config.theta_limit_rad) < 1e-12,
-        "controller final output clamps at the same 4.0 degree limit as MPC");
+        "controller final output clamps at the 4.0 degree hardware limit");
   const auto packet = nx_control::protocol::encode_control_command(output.command);
   check(packet[16] == 0x90U && packet[17] == 0x01U,
         "tube-control-v3 still encodes 4.0 degrees as 400 cdeg");
@@ -1030,14 +957,59 @@ void test_controller_angle_limit() {
         "tube-control-v3 encodes the rate limit as 200 cdeg per second");
 }
 
+void test_inner_angle_watchdog() {
+  nx_control::ControlConfig config;
+  config.inner_angle_warning_dwell_s = 0.04;
+  config.inner_angle_safe_dwell_s = 0.10;
+  nx_control::NxController controller(config);
+  controller.reset(65.0);
+  controller.configure_task(nx_control::TaskMode::Contest45, 0.0, true);
+
+  nx_control::ControlOutput output;
+  bool saw_warning = false;
+  constexpr double kThreeDegrees =
+      3.0 * 3.14159265358979323846 / 180.0;
+  for (std::uint32_t sequence = 1; sequence <= 8; ++sequence) {
+    const double now_s = 65.0 + sequence * config.period_s;
+    const auto now_ms =
+        static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
+    nx_control::TubeStatus tube;
+    tube.sequence = sequence;
+    tube.dmmc_time_ms = now_ms;
+    tube.theta_reference_rad = kThreeDegrees;
+    tube.theta_actual_rad = 0.0;
+    tube.receive_time_s = now_s;
+    controller.ingest_tube_status(tube);
+
+    nx_control::VisionMeasurement vision;
+    vision.frame_id = sequence;
+    vision.status = nx_control::VisionStatus::Measured;
+    vision.ball_confidence = vision.tube_confidence = 1.0;
+    vision.capture_time_ms = now_ms;
+    vision.has_capture_time = true;
+    vision.receive_time_s = now_s;
+    controller.ingest_vision(vision);
+    output = controller.tick(now_s);
+    saw_warning = saw_warning ||
+                  (output.inner_angle_warning && output.request_slowdown);
+  }
+  check(saw_warning,
+        "sustained one-degree inner-loop error requests slowdown");
+  check(output.safety_latched &&
+            output.last_stop_reason == "inner_angle_tracking_error" &&
+            output.command.control_state == nx_control::TaskState::Safe,
+        "sustained two-degree inner-loop error enters latched SAFE");
+}
+
 void test_controller_hold_deadband() {
   nx_control::ControlConfig config;
-  config.solver_deadline_ms = 1000.0;
-  nx_control::NxController controller(config, std::make_unique<LargePositiveSolver>());
+  config.pid_kp_s2 = 10000.0;
+  nx_control::NxController controller(config);
   controller.reset(70.0);
   controller.configure_task(nx_control::TaskMode::HoldCenter, 0.0, true);
 
-  auto ingest_healthy_sample = [&](std::uint32_t sequence) {
+  auto ingest_healthy_sample = [&](std::uint32_t sequence,
+                                   double position_m) {
     const double now_s = 70.0 + static_cast<double>(sequence) * config.period_s;
     const auto now_ms = static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
 
@@ -1057,6 +1029,7 @@ void test_controller_hold_deadband() {
     nx_control::VisionMeasurement vision;
     vision.frame_id = sequence;
     vision.status = nx_control::VisionStatus::Measured;
+    vision.position_m = position_m;
     vision.ball_confidence = vision.tube_confidence = 1.0;
     vision.capture_time_ms = now_ms;
     vision.has_capture_time = true;
@@ -1067,14 +1040,14 @@ void test_controller_hold_deadband() {
 
   nx_control::ControlOutput output;
   for (std::uint32_t sequence = 1; sequence <= 10; ++sequence) {
-    output = controller.tick(ingest_healthy_sample(sequence));
+    output = controller.tick(ingest_healthy_sample(sequence, -0.010));
   }
   const double theta_before_hold_rad = output.command.theta_cmd_rad;
   check(theta_before_hold_rad > 0.0,
         "controller has a nonzero command before entering HoldTarget deadband");
 
   controller.configure_task(nx_control::TaskMode::HoldTarget, 0.0, true);
-  output = controller.tick(ingest_healthy_sample(11));
+  output = controller.tick(ingest_healthy_sample(11, 0.0));
   check(controller.task_manager().target_hold_deadband_active() &&
             output.reason == "hold_deadband" &&
             output.command.control_state == nx_control::TaskState::HoldTarget,
@@ -1086,19 +1059,17 @@ void test_controller_hold_deadband() {
         "HoldTarget deadband returns theta toward zero through the 2 degree per second limiter");
 
   for (std::uint32_t sequence = 12; sequence <= 30; ++sequence) {
-    output = controller.tick(ingest_healthy_sample(sequence));
+    output = controller.tick(ingest_healthy_sample(sequence, 0.0));
   }
   check(std::abs(output.command.theta_cmd_rad) < 1e-12 &&
             output.reason == "hold_deadband",
-        "HoldTarget deadband settles theta at zero without resuming MPC corrections");
+        "HoldTarget deadband settles theta at zero without resuming PID corrections");
 }
 
 void test_contest_chassis_gate() {
   nx_control::ControlConfig config;
-  config.solver_deadline_ms = 1000.0;
-
   auto tick_without_chassis = [&](nx_control::TaskMode mode, double now_s) {
-    nx_control::NxController controller(config, std::make_unique<ZeroSolver>());
+    nx_control::NxController controller(config);
     controller.reset(now_s);
     controller.configure_task(mode, 0.0, true);
 
@@ -1144,16 +1115,13 @@ void test_contest_chassis_gate() {
 
 void test_contest456_ignores_chassis_dynamics() {
   nx_control::ControlConfig config;
-  config.solver_deadline_ms = 1000.0;
   config.measurement_sigma_m = 1e-6;
   config.innovation_gate_sigma = 1e6;
   config.vision_position_filter_tau_s = 0.0;
 
   auto run = [&](nx_control::TaskMode mode, double target_m,
                  bool inject_chassis) {
-    Eigen::VectorXd gradient;
-    nx_control::NxController controller(
-        config, std::make_unique<CapturingZeroSolver>(&gradient));
+    nx_control::NxController controller(config);
     constexpr double now_s = 80.02;
     controller.reset(80.0);
     controller.configure_task(mode, target_m, true);
@@ -1190,8 +1158,7 @@ void test_contest456_ignores_chassis_dynamics() {
     vision.receive_time_s = now_s;
     controller.ingest_vision(vision);
 
-    const nx_control::ControlOutput output = controller.tick(now_s);
-    return std::make_pair(output, gradient);
+    return controller.tick(now_s);
   };
 
   for (const auto mode_and_target :
@@ -1201,23 +1168,20 @@ void test_contest456_ignores_chassis_dynamics() {
         run(mode_and_target.first, mode_and_target.second, false);
     const auto with_chassis =
         run(mode_and_target.first, mode_and_target.second, true);
-    const bool gradients_match =
-        without_chassis.second.size() == with_chassis.second.size() &&
-        (without_chassis.second - with_chassis.second).norm() < 1e-12;
-    check(gradients_match &&
-              std::abs(without_chassis.first.estimate.position_m -
-                       with_chassis.first.estimate.position_m) < 1e-12 &&
-              std::abs(without_chassis.first.estimate.velocity_m_s -
-                       with_chassis.first.estimate.velocity_m_s) < 1e-12 &&
-              std::abs(with_chassis.first.acceleration_used_m_s2) < 1e-12,
-          "contest task 4/5/6 MPC and observer ignore chassis dynamics");
+    check(std::abs(without_chassis.estimate.position_m -
+                   with_chassis.estimate.position_m) < 1e-12 &&
+              std::abs(without_chassis.estimate.velocity_m_s -
+                       with_chassis.estimate.velocity_m_s) < 1e-12 &&
+              std::abs(without_chassis.pid.unsaturated_m_s2 -
+                       with_chassis.pid.unsaturated_m_s2) < 1e-12 &&
+              std::abs(with_chassis.acceleration_used_m_s2) < 1e-12,
+          "contest task 4/5/6 PID and observer ignore chassis dynamics");
   }
 }
 
 void test_contest3_waiting_holds_beam() {
   nx_control::ControlConfig config;
-  config.solver_deadline_ms = 1000.0;
-  nx_control::NxController controller(config, std::make_unique<ZeroSolver>());
+  nx_control::NxController controller(config);
   controller.reset(60.0);
   controller.configure_task(nx_control::TaskMode::Contest3, 0.0, false, false);
 
@@ -1260,9 +1224,8 @@ void test_controller_task3_friction_and_protocol() {
   constexpr double kDegrees =
       3.14159265358979323846 / 180.0;
   nx_control::ControlConfig config;
-  config.solver_deadline_ms = 1000.0;
   config.task3_friction_blend_time_s = 0.04;
-  nx_control::NxController controller(config, std::make_unique<ZeroSolver>());
+  nx_control::NxController controller(config);
   controller.reset(100.0);
   controller.configure_task(nx_control::TaskMode::Contest3, 0.0, true);
 
@@ -1308,7 +1271,7 @@ void test_controller_task3_friction_and_protocol() {
          output.command.theta_cmd_rad > 0.4 * kDegrees);
   }
   check(rate_limit_ok,
-        "Task 3 total bias/friction/MPC angle respects 4 degree and 2 degree/s limits");
+        "Task 3 total bias/friction/PID angle respects 4 degree and 2 degree/s limits");
   check(saw_positive_breakaway &&
             output.friction_mode ==
                 nx_control::FrictionMode::RollingPositive &&
@@ -1397,11 +1360,10 @@ void test_controller_task3_friction_and_protocol() {
 
 void test_controller_task3_position_early_braking() {
   nx_control::ControlConfig config;
-  config.solver_deadline_ms = 1000.0;
   config.innovation_gate_sigma = 1000.0;
   config.measurement_sigma_m = 1e-6;
   config.vision_position_filter_tau_s = 0.0;
-  nx_control::NxController controller(config, std::make_unique<ZeroSolver>());
+  nx_control::NxController controller(config);
   controller.reset(300.0);
   controller.configure_task(nx_control::TaskMode::Contest3, 0.0, true);
 
@@ -1453,7 +1415,7 @@ void test_controller_task3_position_early_braking() {
       saw_positive_braking_after_threshold = true;
       strongest_normal_braking_theta_rad =
           std::min(strongest_normal_braking_theta_rad,
-                   output.theta_mpc_rad);
+                   output.theta_pid_rad);
     }
     if (output.estimate.position_m >
             config.task3_positive_overshoot_position_m &&
@@ -1461,7 +1423,7 @@ void test_controller_task3_position_early_braking() {
       saw_positive_overshoot_recovery = true;
       strongest_overshoot_theta_rad =
           std::min(strongest_overshoot_theta_rad,
-                   output.theta_mpc_rad);
+                   output.theta_pid_rad);
     }
   }
   check(!braked_before_threshold &&
@@ -1504,8 +1466,9 @@ void test_controller_task3_position_early_braking() {
       saw_reverse_balance = true;
       reverse_balance_command_ok =
           reverse_balance_command_ok &&
-          std::abs(output.theta_mpc_rad) < 1e-12 &&
+          std::abs(output.theta_pid_rad) < 1e-12 &&
           std::abs(output.theta_friction_rad) < 1e-12 &&
+          output.pid.integrator_frozen &&
           std::abs(output.command.theta_rate_limit_rad_s -
                    config.task3_reverse_balance_rate_limit_rad_s) < 1e-12 &&
           std::abs(output.command.theta_cmd_rad -
@@ -1559,16 +1522,20 @@ void test_csv_task3_diagnostics() {
   std::string row;
   std::getline(stream, header);
   std::getline(stream, row);
-  const std::array<const char*, 19> required_fields{
+  const std::array<const char*, 32> required_fields{
       "task3_stage",       "planned_x_m",       "planned_v_m_s",
       "planned_a_m_s2",    "settle_position_ok", "settle_velocity_ok",
       "settle_theta_ok",    "settle_elapsed_ms", "task3_early_braking",
       "task3_positive_overshoot_recovery",
       "task3_reverse_balance_active",
-      "theta_mpc_deg",
+      "theta_pid_deg",
       "theta_bias_deg",     "theta_friction_deg", "theta_command_deg",
       "friction_mode",      "friction_direction", "theta_actual_deg",
-      "vision_capture_age_ms"};
+      "vision_capture_age_ms", "position_error_m", "velocity_error_m_s",
+      "pid_p_m_s2", "pid_i_m_s2", "pid_d_m_s2", "pid_ff_m_s2",
+      "pid_disturbance_m_s2", "pid_unsaturated_m_s2", "pid_applied_m_s2",
+      "pid_integrator_frozen", "pid_integral_limited", "pid_saturated",
+      "inner_angle_error_rad"};
   bool fields_present = true;
   for (const char* field : required_fields) {
     fields_present = fields_present &&
@@ -1589,12 +1556,12 @@ int main() {
   test_vision_position_filter();
   test_remote_clock_sync();
   test_persistent_sequence();
-  test_mpc_constraints();
-  test_mpc_actuator_delay();
+  test_pid_controller();
   test_task_manager();
   test_task3_friction_compensator();
   test_controller_safety();
   test_controller_angle_limit();
+  test_inner_angle_watchdog();
   test_controller_hold_deadband();
   test_contest_chassis_gate();
   test_contest456_ignores_chassis_dynamics();
