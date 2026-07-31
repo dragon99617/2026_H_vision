@@ -165,6 +165,8 @@ struct ControlOutput {
   bool settle_theta_ok = false;
   double settle_elapsed_ms = 0.0;
   bool task3_early_braking = false;
+  bool task3_positive_overshoot_recovery = false;
+  bool task3_reverse_balance_active = false;
   double u_command_m_s2 = 0.0;
   double theta_mpc_rad = 0.0;
   double theta_bias_rad = 0.0;
@@ -212,8 +214,8 @@ struct ControlConfig {
   double hold_enter_position_error_m = 0.004;
   double hold_enter_velocity_m_s = 0.015;
   double hold_exit_position_error_m = 0.008;
-  double task3_reference_max_velocity_m_s = 0.030;
-  double task3_reference_max_acceleration_m_s2 = 0.060;
+  double task3_reference_max_velocity_m_s = 0.070;
+  double task3_reference_max_acceleration_m_s2 = 0.100;
   double task3_reference_max_jerk_m_s3 = 0.300;
   double task3_settle_position_error_m = 0.010;
   double task3_settle_velocity_m_s = 0.005;
@@ -229,7 +231,13 @@ struct ControlConfig {
   double task3_friction_breakaway_timeout_s = 0.75;
   double task3_braking_deceleration_m_s2 = 0.080;
   double task3_early_brake_position_m = 0.040;
+  double task3_positive_early_brake_position_m = 0.038;
   double task3_positive_reached_position_m = 0.040;
+  double task3_positive_overshoot_position_m = 0.050;
+  double task3_positive_overshoot_deceleration_m_s2 = 0.100;
+  double task3_positive_reverse_velocity_m_s = 0.020;
+  double task3_reverse_balance_rate_limit_rad_s =
+      4.0 * 3.14159265358979323846 / 180.0;
   double task3_friction_rolling_enter_velocity_m_s = 0.010;
   double task3_friction_stationary_enter_velocity_m_s = 0.005;
   double task3_friction_disable_position_error_m = 0.0025;
@@ -237,6 +245,7 @@ struct ControlConfig {
   double task3_friction_request_acceleration_m_s2 = 0.005;
   double slack_weight = 5000.0;
   double measurement_sigma_m = 0.003;
+  double vision_position_filter_tau_s = 0.010;
   double predicted_min_confidence = 0.40;
   double process_accel_sigma_m_s2 = 0.20;
   double process_disturbance_sigma_m_s3 = 0.08;

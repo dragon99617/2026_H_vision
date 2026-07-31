@@ -67,8 +67,7 @@ bool TaskManager::is_static_sequence() const {
 }
 
 bool TaskManager::is_vehicle_task() const {
-  return mode_ == TaskMode::AutoVehicle || mode_ == TaskMode::Contest45 ||
-         mode_ == TaskMode::Contest6;
+  return mode_ == TaskMode::AutoVehicle;
 }
 
 void TaskManager::configure(TaskMode mode, double target_m, bool start_immediately,
@@ -221,7 +220,9 @@ ReferencePoint TaskManager::update(double now_s, const ObserverState& estimate,
                                    bool feedback_valid) {
   last_update_s_ = now_s;
   if (state_ == TaskState::Safe || state_ == TaskState::Fault) return current_reference_;
-  if (chassis != nullptr) {
+  const bool accepts_chassis_start =
+      mode_ != TaskMode::Contest45 && mode_ != TaskMode::Contest6;
+  if (chassis != nullptr && accepts_chassis_start) {
     const std::uint16_t rising = static_cast<std::uint16_t>(chassis->events & ~previous_events_);
     previous_events_ = chassis->events;
     if (start_on_chassis_event_ && (rising & 0x0001U) != 0U &&

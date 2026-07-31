@@ -49,6 +49,7 @@ struct Options {
   double target_m = 0.0;
   bool target_set = false;
   bool start_immediately = true;
+  bool wait_start = false;
   bool key_start = false;
   bool dry_run = false;
   double max_seconds = 0.0;
@@ -148,7 +149,10 @@ Options parse_options(int argc, char** argv) {
       options.target_m = std::stod(value()) / 100.0;
       options.target_set = true;
     }
-    else if (argument == "--wait-start") options.start_immediately = false;
+    else if (argument == "--wait-start") {
+      options.wait_start = true;
+      options.start_immediately = false;
+    }
     else if (argument == "--key-start" || argument == "--keyboard-start") {
       options.key_start = true;
       options.start_immediately = false;
@@ -158,7 +162,7 @@ Options parse_options(int argc, char** argv) {
     else if (argument == "--help") {
       std::cout << "ball_nx_control [--config FILE] [--dmmc DEVICE] [--vision-port PORT]\n"
                    "  [--task 3|45|6|idle|static|center|target|auto] [--target-cm CM]\n"
-                   "  [--wait-start | --key-start]\n"
+                   "  [--wait-start | --key-start]  (--wait-start is unavailable for 45/6)\n"
                    "  [--log CSV] [--state-file FILE] [--start-command-id ID]\n"
                    "  [--dry-run] [--max-seconds SECONDS]\n";
       std::exit(0);
@@ -171,6 +175,12 @@ Options parse_options(int argc, char** argv) {
   }
   if (options.task == nx_control::TaskMode::Contest6 && !options.target_set) {
     throw std::invalid_argument("task 6 requires --target-cm CM");
+  }
+  if (options.wait_start &&
+      (options.task == nx_control::TaskMode::Contest45 ||
+       options.task == nx_control::TaskMode::Contest6)) {
+    throw std::invalid_argument(
+        "tasks 4/5/6 do not use chassis events; use immediate start or --key-start");
   }
   if (options.state_file.empty() && !options.dry_run) {
     throw std::invalid_argument("--state-file cannot be empty");
@@ -328,6 +338,10 @@ int main(int argc, char** argv) {
                     << "deg mpc=" << output.mpc_solve_ms << "ms"
                     << " early_brake="
                     << (output.task3_early_braking ? 1 : 0)
+                    << " overshoot_recovery="
+                    << (output.task3_positive_overshoot_recovery ? 1 : 0)
+                    << " reverse_balance="
+                    << (output.task3_reverse_balance_active ? 1 : 0)
                     << " flags=0x" << std::hex << static_cast<int>(output.command.flags) << std::dec
                     << " reason=" << output.reason << '\n';
           next_report = now + 1.0;

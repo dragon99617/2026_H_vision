@@ -36,9 +36,12 @@ class NxController {
  private:
   double model_u_from_actual_theta(double theta_actual_rad) const;
   double rate_limit_mpc_and_clamp(double requested_u);
-  double rate_limit_final_angle(double requested_theta_rad) const;
+  double rate_limit_final_angle(double requested_theta_rad,
+                                double rate_limit_rad_s) const;
   double fallback_command(const ObserverState& estimate, const ReferencePoint& reference,
                           double feedforward) const;
+  bool contest_uses_camera_feedback_only() const;
+  double chassis_acceleration_for_control(double now_s) const;
   bool hold_prediction_crosses_soft_boundary(const ObserverState& estimate,
                                              double actuator_u_m_s2,
                                              double chassis_acceleration_m_s2,
@@ -70,6 +73,9 @@ class NxController {
       std::numeric_limits<double>::infinity();
   double latest_visual_position_m_ = 0.0;
   bool latest_visual_position_valid_ = false;
+  double filtered_visual_position_m_ = 0.0;
+  double visual_position_filter_time_s_ = 0.0;
+  bool visual_position_filter_initialized_ = false;
   std::uint32_t command_id_ = 0;
   double previous_mpc_u_ = 0.0;
   double previous_theta_command_rad_ = 0.0;
@@ -78,6 +84,8 @@ class NxController {
   int task3_early_brake_stage_ = -1;
   bool task3_early_braking_active_ = false;
   bool task3_early_braking_done_ = false;
+  bool task3_reverse_balance_active_ = false;
+  bool task3_reverse_balance_done_ = false;
   int solver_failures_ = 0;
   double first_solver_failure_s_ = -1.0;
   bool safety_latched_ = false;

@@ -225,8 +225,18 @@ ControlConfig load_config(const std::string& path) {
          config.task3_braking_deceleration_m_s2);
   number("task3_early_brake_position_m",
          config.task3_early_brake_position_m);
+  number("task3_positive_early_brake_position_m",
+         config.task3_positive_early_brake_position_m);
   number("task3_positive_reached_position_m",
          config.task3_positive_reached_position_m);
+  number("task3_positive_overshoot_position_m",
+         config.task3_positive_overshoot_position_m);
+  number("task3_positive_overshoot_deceleration_m_s2",
+         config.task3_positive_overshoot_deceleration_m_s2);
+  number("task3_positive_reverse_velocity_m_s",
+         config.task3_positive_reverse_velocity_m_s);
+  number("task3_reverse_balance_rate_limit_rad_s",
+         config.task3_reverse_balance_rate_limit_rad_s);
   number("task3_friction_rolling_enter_velocity_m_s",
          config.task3_friction_rolling_enter_velocity_m_s);
   number("task3_friction_stationary_enter_velocity_m_s",
@@ -239,6 +249,8 @@ ControlConfig load_config(const std::string& path) {
          config.task3_friction_request_acceleration_m_s2);
   number("slack_weight", config.slack_weight);
   number("measurement_sigma_m", config.measurement_sigma_m);
+  number("vision_position_filter_tau_s",
+         config.vision_position_filter_tau_s);
   number("predicted_min_confidence", config.predicted_min_confidence);
   number("process_accel_sigma_m_s2", config.process_accel_sigma_m_s2);
   number("process_disturbance_sigma_m_s3", config.process_disturbance_sigma_m_s3);
@@ -275,6 +287,7 @@ ControlConfig load_config(const std::string& path) {
           config.qp_check_termination_interval);
   boolean("qp_scaled_termination", config.qp_scaled_termination);
   if (!(config.period_s > 0.0 && config.actuator_tau_s > 0.0 && config.horizon > 0 &&
+        config.vision_position_filter_tau_s >= 0.0 &&
         config.predicted_min_confidence >= 0.0 && config.predicted_min_confidence <= 1.0 &&
         config.vision_frame_rate_hz > 0.0 &&
         config.vision_decay_start_s >= 0.0 &&
@@ -297,8 +310,21 @@ ControlConfig load_config(const std::string& path) {
         config.task3_braking_deceleration_m_s2 > 0.0 &&
         config.task3_early_brake_position_m > 0.0 &&
         config.task3_early_brake_position_m < 0.05 &&
+        config.task3_positive_early_brake_position_m > 0.0 &&
+        config.task3_positive_early_brake_position_m <
+            config.task3_positive_reached_position_m &&
         config.task3_positive_reached_position_m > 0.0 &&
         config.task3_positive_reached_position_m < 0.05 &&
+        config.task3_positive_overshoot_position_m >
+            config.task3_positive_reached_position_m &&
+        config.task3_positive_overshoot_position_m <
+            config.position_soft_limit_m &&
+        config.task3_positive_overshoot_deceleration_m_s2 >=
+            config.task3_braking_deceleration_m_s2 &&
+        config.task3_positive_reverse_velocity_m_s >
+            config.task3_friction_rolling_enter_velocity_m_s &&
+        config.task3_reverse_balance_rate_limit_rad_s >=
+            config.theta_rate_limit_rad_s &&
         config.task3_friction_stationary_enter_velocity_m_s >= 0.0 &&
         config.task3_friction_rolling_enter_velocity_m_s >
             config.task3_friction_stationary_enter_velocity_m_s &&
@@ -430,7 +456,8 @@ bool CsvLogger::open(const std::string& path) {
              "dmmc_controller_state,safety_latched,safety_event_id,last_stop_reason,"
              "task3_stage,planned_x_m,planned_v_m_s,planned_a_m_s2,"
              "settle_position_ok,settle_velocity_ok,settle_theta_ok,settle_elapsed_ms,"
-             "task3_early_braking,"
+             "task3_early_braking,task3_positive_overshoot_recovery,"
+             "task3_reverse_balance_active,"
              "theta_mpc_deg,theta_bias_deg,theta_friction_deg,theta_command_deg,"
              "friction_mode,friction_direction,theta_actual_deg,"
              "x_m,v_m_s,d_m_s2,x_ref_m,u_cmd_m_s2,"
@@ -465,6 +492,8 @@ void CsvLogger::write(double now_s, const ControlOutput& output, const TubeStatu
           << ',' << (output.settle_theta_ok ? 1 : 0)
           << ',' << output.settle_elapsed_ms
           << ',' << (output.task3_early_braking ? 1 : 0)
+          << ',' << (output.task3_positive_overshoot_recovery ? 1 : 0)
+          << ',' << (output.task3_reverse_balance_active ? 1 : 0)
           << ',' << output.theta_mpc_rad * kRadiansToDegrees
           << ',' << output.theta_bias_rad * kRadiansToDegrees
           << ',' << output.theta_friction_rad * kRadiansToDegrees
