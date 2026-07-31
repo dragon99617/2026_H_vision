@@ -20,6 +20,7 @@ class NxController {
   void configure_task(TaskMode mode, double target_m, bool start_immediately,
                       bool start_on_chassis_event = true);
   void start_task(double now_s);
+  void stop_task();
   void ingest_vision(VisionMeasurement measurement);
   void ingest_tube_status(const TubeStatus& status);
   void ingest_chassis_state(const ChassisState& state);

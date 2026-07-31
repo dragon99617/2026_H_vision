@@ -1,7 +1,9 @@
 # Jetson NX 滚球控制项目
 
-本目录是独立的 C++17 生产控制项目。它在50 Hz下接收现有 YOLO26s 视觉位置、
-DMMC 管道实际角和底盘状态，输出 `tube-control-v3`，不控制车轮。
+本目录是独立的 C++17 生产控制项目。系统采用“NX 50 Hz小球位置外环 +
+DMMC02 1 kHz管角/电机内环”：NX的控制周期和 `tube-control-v3` 发送周期均为
+20 ms，DMMC02在相邻两条NX命令之间以1 ms周期完成轨迹插值、机构逆解和电机控制。
+NX不控制车轮，仍以50 Hz的 `tube-status-v3` 监控DMMC02管角状态。
 
 已实现的链路：
 
@@ -12,7 +14,7 @@ DMMC 管道实际角和底盘状态，输出 `tube-control-v3`，不控制车轮
 - 状态 `[x, x_dot, d]` 的卡尔曼观测器、置信度动态测量噪声、3σ门限和至少
   250 ms历史；v3迟到测量在曝光时刻更新后重放；
 - 所有活动任务共用带前馈、积分分离和反算抗饱和的位置外环PID；NX输出目标管角，
-  MC02继续执行现有机构逆解、角度拟合和电机/管角内环；
+  DMMC02以1 kHz继续执行机构逆解、角度拟合、轨迹约束和电机/管角内环；
 - 管角硬限幅、角速度限制、内环角差监控和轻量安全预测；视觉丢失100～250 ms
   先进入0° HOLD软保护，超过250 ms或软边界存在
   当前/预测风险时进入锁存SAFE；底盘、DMMC超时和±11.5 cm边界也会触发安全锁存；
@@ -24,6 +26,17 @@ DMMC 管道实际角和底盘状态，输出 `tube-control-v3`，不控制车轮
 - 每周期CSV、离线重放和位置误差、PID分量、饱和率、内环角差统计。
 
 线协议的唯一字节级定义见 [PROTOCOL.md](PROTOCOL.md)。
+
+## 控制频率与DMMC02兼容性
+
+- `config/nx-control.conf`中的`period_s=0.020`保持NX位置外环、PID和串口命令为
+  50 Hz；Linux侧不创建1 kHz发送或忙等待控制线程。
+- `theta_rate_limit_rad_s`始终是rad/s物理量。普通阶段保持`2°/s`，Task3返程
+  平衡阶段保持`4°/s`，不随DMMC02本地控制周期缩放。
+- `tube-control-v3`、`tube-status-v3`的字段、TTL、`command_id`和CRC均未改变；
+  DMMC02状态和NX命令仍各以50 Hz传输，本地1 kHz内环不增加串口流量。
+- DMMC02本地完成的PID、机构拟合、摩擦和安全参数不会因频率升级由NX自动改写；
+  后续只根据实机日志重新整定。
 
 ## 构建和测试
 
@@ -40,7 +53,8 @@ cd build && ctest --output-on-failure
 Jetson CPU优化；若在一台机器上交叉构建给不同CPU运行，可加
 `-DNX_CONTROL_NATIVE_OPTIMIZATION=OFF`。
 
-启动会打印 `Controller: cascaded PID`。外环使用观测器位置/速度，控制律为
+启动会打印 `NX 50 Hz position outer loop (20 ms) + DMMC02 1 kHz angle/motor
+inner loop (1 ms)`。外环使用观测器位置/速度，控制律为
 `u=Kp·ex+Ki·I+Kd·ev+a_chassis+a_ref/lambda-Kd_dist·d/lambda`，再由
 `theta=atan(u/g)`换算目标管角。积分只在误差不超过3 cm时累积，角度限幅、限速
 以及Task3专项覆盖都会通过反算反馈到积分器。
@@ -95,7 +109,8 @@ python3 tools/analyze_log.py logs/smoke.csv
 ./nx_control/build/ball_nx_control \
   --config nx_control/config/nx-control.conf \
   --dmmc /dev/ttyACM0 --task auto --log nx_control/logs/live.csv \
-  --state-file nx_control/state/tube-control-v3.seq
+  --state-file nx_control/state/tube-control-v3.seq \
+  --command-socket /tmp/ball_nx_control.sock
 
 python3 run.py --no-serial --protocol tube-v3 \
   --control-udp 127.0.0.1:29001
@@ -105,6 +120,12 @@ python3 run.py --no-serial --protocol tube-v3 \
 不会积累旧视觉帧，控制侧按 `frame_id`、采集时刻和超时处理。DMMC使用独立的
 921600-8N1双向 USB CDC。也可用 `--vision-bind`、`--vision-port`、`--baud`
 覆盖。
+
+网页运行时切换任务使用本机 Unix 数据报套接字，默认路径为
+`/tmp/ball_nx_control.sock`，可用 `--command-socket`覆盖。网页请求在下一个50 Hz
+控制周期中应用，支持任务3/4/5/6、开始、停止、复位和状态查询，并返回实际任务、
+目标、视觉/DMMC健康状态及SAFE原因。该接口只允许本机进程访问，不对Wi-Fi直接
+开放；HTTP到本机套接字的转换由 `agx_web_test/tools/snapshot_server.py`完成。
 
 任务参数：
 
@@ -221,8 +242,10 @@ NX的摆杆命令硬限幅为`±4.0°`，普通角速度限制为`2°/s`，Task3
 配套MC02固件应使用`default_rate_limit_deg_s=2.0`、
 `minimum_rate_limit_deg_s=0.5`、`maximum_rate_limit_deg_s=4.0`和
 `acceleration_limit_deg_s2=5.0`，但这些固件参数不属于本NX工程。
-NX比较MC02回传的`theta_reference`与`theta_actual`：角差超过1°持续0.2秒时
-请求底盘减速，超过2°持续0.5秒时锁存SAFE。该监控不改变机构逆解或拟合参数。
+NX比较DMMC02以50 Hz回传的`theta_reference`与`theta_actual`：角差超过1°持续
+0.2秒时请求底盘减速，超过2°持续0.5秒时锁存SAFE。驻留时间使用NX单调时钟的
+真实持续时间计算，不使用固定样本计数，也不要求DMMC02以1 kHz回传状态。该监控
+不改变机构逆解、拟合、PID、摩擦或安全阈值。
 
 `HoldTarget`在位置误差小于4 mm且估计速度小于15 mm/s时进入带滞回的静止区；
 位置误差超过8 mm才退出。非Task3静止区内暂停PID追踪，管道角度按2°/s限制缓慢

@@ -4,6 +4,7 @@
 #include "nx_control/observer.hpp"
 #include "nx_control/pid.hpp"
 #include "nx_control/protocol.hpp"
+#include "nx_control/runtime_command.hpp"
 #include "nx_control/task_manager.hpp"
 
 #include <array>
@@ -354,6 +355,33 @@ void test_remote_clock_sync() {
         "remote clock reset handles MCU reboot");
 }
 
+void test_runtime_command_protocol() {
+  const auto task6 = nx_control::parse_runtime_command("TASK req_42 6 -7.3");
+  check(task6.type == nx_control::RuntimeCommandType::Task &&
+            task6.request_id == "req_42" && task6.task == "6" &&
+            task6.target_cm.has_value() &&
+            std::abs(*task6.target_cm + 7.3) < 1e-12,
+        "runtime command parses task 6 target");
+  const auto task4 = nx_control::parse_runtime_command("TASK 43 4");
+  check(task4.type == nx_control::RuntimeCommandType::Task &&
+            task4.task == "4" && !task4.target_cm.has_value(),
+        "runtime command preserves separate task 4 selection");
+  check(nx_control::parse_runtime_command("STOP 44").type ==
+            nx_control::RuntimeCommandType::Stop &&
+            nx_control::parse_runtime_command("RESET 45").type ==
+                nx_control::RuntimeCommandType::Reset &&
+            nx_control::parse_runtime_command("STATUS 46").type ==
+                nx_control::RuntimeCommandType::Status,
+        "runtime command parses stop, reset, and status verbs");
+  check(nx_control::parse_runtime_command("TASK bad/id 6 0").error_code ==
+            "INVALID_REQUEST_ID" &&
+            nx_control::parse_runtime_command("TASK 47 6 nan").error_code ==
+                "INVALID_TARGET",
+        "runtime command rejects unsafe request IDs and non-finite targets");
+  check(nx_control::json_escape("a\n\"b\\c") == "a\\n\\\"b\\\\c",
+        "runtime command JSON response escapes control characters");
+}
+
 void test_persistent_sequence() {
   char path[] = "/tmp/nx-control-sequence-XXXXXX";
   const int temporary_fd = ::mkstemp(path);
@@ -385,12 +413,20 @@ void test_persistent_sequence() {
 
 void test_pid_controller() {
   nx_control::ControlConfig config;
+  check(std::abs(config.period_s - 0.020) < 1e-12,
+        "NX default control period remains 20 ms (50 Hz)");
   check(std::abs(config.theta_limit_rad -
                  4.0 * 3.14159265358979323846 / 180.0) < 1e-12,
         "NX default angle limit matches DMMC02 4.0 degree hard limit");
   check(std::abs(config.theta_rate_limit_rad_s -
                  2.0 * 3.14159265358979323846 / 180.0) < 1e-12,
         "NX default angle rate limit is 2 degrees per second");
+  check(std::abs(config.task3_reverse_balance_rate_limit_rad_s -
+                 4.0 * 3.14159265358979323846 / 180.0) < 1e-12,
+        "Task 3 reverse-balance rate limit remains 4 degrees per second");
+  check(std::abs(config.inner_angle_warning_dwell_s - 0.20) < 1e-12 &&
+            std::abs(config.inner_angle_safe_dwell_s - 0.50) < 1e-12,
+        "inner-angle watchdog defaults remain 0.2 s warning and 0.5 s SAFE");
   check(std::abs(config.pid_kp_s2 - 10.0) < 1e-12 &&
             std::abs(config.pid_ki_s3 - 0.8) < 1e-12 &&
             std::abs(config.pid_kd_s_inv - 5.0) < 1e-12,
@@ -454,6 +490,27 @@ void test_pid_controller() {
   check(reported_integral_limit &&
             std::abs(limited_pid.integral_output_m_s2()) <= 0.001 + 1e-12,
         "PID integral contribution is explicitly clamped and diagnosed");
+}
+
+void test_deployed_timing_contract() {
+  const auto config = nx_control::load_config(
+      std::string(NX_CONTROL_TEST_SOURCE_DIR) + "/config/nx-control.conf");
+  check(std::abs(config.period_s - 0.020) < 1e-12,
+        "nx-control.conf keeps the NX outer loop at 20 ms (50 Hz)");
+  check(std::abs(config.theta_limit_rad -
+                 4.0 * 3.14159265358979323846 / 180.0) < 1e-12 &&
+            std::abs(config.theta_rate_limit_rad_s -
+                     2.0 * 3.14159265358979323846 / 180.0) < 1e-12 &&
+            std::abs(config.task3_reverse_balance_rate_limit_rad_s -
+                     4.0 * 3.14159265358979323846 / 180.0) < 1e-12,
+        "deployed config preserves 4 degree clamp and physical 2/4 degree per second limits");
+  check(std::abs(config.inner_angle_warning_rad -
+                 1.0 * 3.14159265358979323846 / 180.0) < 1e-12 &&
+            std::abs(config.inner_angle_safe_rad -
+                     2.0 * 3.14159265358979323846 / 180.0) < 1e-12 &&
+            std::abs(config.inner_angle_warning_dwell_s - 0.20) < 1e-12 &&
+            std::abs(config.inner_angle_safe_dwell_s - 0.50) < 1e-12,
+        "deployed config preserves inner-angle thresholds and real-time dwell durations");
 }
 
 void test_task_manager() {
@@ -906,6 +963,7 @@ void test_controller_safety() {
 void test_controller_angle_limit() {
   nx_control::ControlConfig config;
   config.pid_kp_s2 = 10000.0;
+  config.innovation_gate_sigma = 1000.0;
   nx_control::NxController controller(config);
   controller.reset(20.0);
   controller.configure_task(nx_control::TaskMode::HoldCenter, 0.0, true);
@@ -959,18 +1017,13 @@ void test_controller_angle_limit() {
 
 void test_inner_angle_watchdog() {
   nx_control::ControlConfig config;
-  config.inner_angle_warning_dwell_s = 0.04;
-  config.inner_angle_safe_dwell_s = 0.10;
   nx_control::NxController controller(config);
   controller.reset(65.0);
   controller.configure_task(nx_control::TaskMode::Contest45, 0.0, true);
 
-  nx_control::ControlOutput output;
-  bool saw_warning = false;
   constexpr double kThreeDegrees =
       3.0 * 3.14159265358979323846 / 180.0;
-  for (std::uint32_t sequence = 1; sequence <= 8; ++sequence) {
-    const double now_s = 65.0 + sequence * config.period_s;
+  auto tick_with_tracking_error = [&](std::uint32_t sequence, double now_s) {
     const auto now_ms =
         static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
     nx_control::TubeStatus tube;
@@ -989,21 +1042,32 @@ void test_inner_angle_watchdog() {
     vision.has_capture_time = true;
     vision.receive_time_s = now_s;
     controller.ingest_vision(vision);
-    output = controller.tick(now_s);
-    saw_warning = saw_warning ||
-                  (output.inner_angle_warning && output.request_slowdown);
-  }
-  check(saw_warning,
-        "sustained one-degree inner-loop error requests slowdown");
+    return controller.tick(now_s);
+  };
+
+  tick_with_tracking_error(1U, 65.000);
+  auto output = tick_with_tracking_error(2U, 65.199);
+  check(!output.inner_angle_warning && !output.safety_latched,
+        "inner-angle warning does not trigger before 0.2 s despite irregular samples");
+  output = tick_with_tracking_error(3U, 65.201);
+  check(output.inner_angle_warning && output.request_slowdown &&
+            !output.safety_latched,
+        "one-degree inner-loop error triggers after 0.2 s of real elapsed time");
+  output = tick_with_tracking_error(4U, 65.499);
+  check(!output.safety_latched,
+        "inner-angle SAFE does not latch before 0.5 s despite irregular samples");
+  output = tick_with_tracking_error(5U, 65.501);
   check(output.safety_latched &&
             output.last_stop_reason == "inner_angle_tracking_error" &&
             output.command.control_state == nx_control::TaskState::Safe,
-        "sustained two-degree inner-loop error enters latched SAFE");
+        "two-degree inner-loop error latches SAFE after 0.5 s of real elapsed time");
 }
 
 void test_controller_hold_deadband() {
   nx_control::ControlConfig config;
   config.pid_kp_s2 = 10000.0;
+  config.hold_enter_position_error_m = 0.10;
+  config.hold_enter_velocity_m_s = 0.10;
   nx_control::NxController controller(config);
   controller.reset(70.0);
   controller.configure_task(nx_control::TaskMode::HoldCenter, 0.0, true);
@@ -1241,6 +1305,7 @@ void test_controller_task3_friction_and_protocol() {
     nx_control::TubeStatus tube;
     tube.sequence = sequence;
     tube.dmmc_time_ms = now_ms;
+    tube.theta_reference_rad = feedback_theta_rad;
     tube.theta_actual_rad = feedback_theta_rad;
     tube.receive_time_s = now_s;
     controller.ingest_tube_status(tube);
@@ -1288,6 +1353,7 @@ void test_controller_task3_friction_and_protocol() {
   nx_control::TubeStatus tube;
   tube.sequence = 41U;
   tube.dmmc_time_ms = 100920U;
+  tube.theta_reference_rad = feedback_theta_rad;
   tube.theta_actual_rad = feedback_theta_rad;
   tube.receive_time_s = 100.92;
   controller.ingest_tube_status(tube);
@@ -1555,8 +1621,10 @@ int main() {
   test_delayed_observer();
   test_vision_position_filter();
   test_remote_clock_sync();
+  test_runtime_command_protocol();
   test_persistent_sequence();
   test_pid_controller();
+  test_deployed_timing_contract();
   test_task_manager();
   test_task3_friction_compensator();
   test_controller_safety();

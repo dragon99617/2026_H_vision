@@ -1,6 +1,7 @@
 #include "nx_control/controller.hpp"
 #include "nx_control/io.hpp"
 #include "nx_control/protocol.hpp"
+#include "nx_control/runtime_command.hpp"
 
 #include <termios.h>
 #include <unistd.h>
@@ -13,12 +14,15 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -44,6 +48,7 @@ struct Options {
   int baud = 921600;
   std::string log = "logs/nx-control.csv";
   std::string state_file = "state/tube-control-v3.seq";
+  std::string command_socket = "/tmp/ball_nx_control.sock";
   std::uint32_t start_command_id = 1U;
   nx_control::TaskMode task = nx_control::TaskMode::HoldCenter;
   double target_m = 0.0;
@@ -137,6 +142,7 @@ Options parse_options(int argc, char** argv) {
     else if (argument == "--baud") options.baud = std::stoi(value());
     else if (argument == "--log") options.log = value();
     else if (argument == "--state-file") options.state_file = value();
+    else if (argument == "--command-socket") options.command_socket = value();
     else if (argument == "--start-command-id") {
       const std::uint64_t parsed = parse_u64(value(), argument);
       if (parsed > std::numeric_limits<std::uint32_t>::max()) {
@@ -164,6 +170,7 @@ Options parse_options(int argc, char** argv) {
                    "  [--task 3|45|6|idle|static|center|target|auto] [--target-cm CM]\n"
                    "  [--wait-start | --key-start]  (--wait-start is unavailable for 45/6)\n"
                    "  [--log CSV] [--state-file FILE] [--start-command-id ID]\n"
+                   "  [--command-socket PATH]\n"
                    "  [--dry-run] [--max-seconds SECONDS]\n";
       std::exit(0);
     } else {
@@ -185,7 +192,220 @@ Options parse_options(int argc, char** argv) {
   if (options.state_file.empty() && !options.dry_run) {
     throw std::invalid_argument("--state-file cannot be empty");
   }
+  if (options.command_socket.empty()) {
+    throw std::invalid_argument("--command-socket cannot be empty");
+  }
   return options;
+}
+
+struct RuntimeTaskState {
+  std::string active_task;
+  std::string control_mode;
+  std::optional<double> target_cm;
+  bool running = false;
+  std::string message;
+};
+
+struct RuntimeCommandResult {
+  nx_control::RuntimeCommand command;
+  bool ok = true;
+  bool applied = true;
+  std::string error_code;
+  std::string message;
+};
+
+std::string initial_task_name(nx_control::TaskMode mode) {
+  switch (mode) {
+    case nx_control::TaskMode::Contest3:
+      return "3";
+    case nx_control::TaskMode::Contest45:
+      return "5";
+    case nx_control::TaskMode::Contest6:
+      return "6";
+    case nx_control::TaskMode::HoldCenter:
+      return "center";
+    case nx_control::TaskMode::HoldTarget:
+      return "target";
+    case nx_control::TaskMode::AutoVehicle:
+      return "auto";
+    case nx_control::TaskMode::StaticSequence:
+      return "static";
+    case nx_control::TaskMode::Idle:
+      return "idle";
+  }
+  return "idle";
+}
+
+std::string control_mode_name(nx_control::TaskMode mode) {
+  switch (mode) {
+    case nx_control::TaskMode::Contest3:
+    case nx_control::TaskMode::StaticSequence:
+      return "swing_test";
+    case nx_control::TaskMode::Contest45:
+    case nx_control::TaskMode::HoldCenter:
+      return "hold_center";
+    case nx_control::TaskMode::Contest6:
+    case nx_control::TaskMode::HoldTarget:
+      return "hold_target";
+    case nx_control::TaskMode::AutoVehicle:
+      return "auto_vehicle";
+    case nx_control::TaskMode::Idle:
+      return "idle";
+  }
+  return "idle";
+}
+
+const char* task_state_name(nx_control::TaskState state) {
+  switch (state) {
+    case nx_control::TaskState::Idle:
+      return "idle";
+    case nx_control::TaskState::StaticMove:
+      return "static_move";
+    case nx_control::TaskState::HoldCenter:
+      return "hold_center";
+    case nx_control::TaskState::HoldTarget:
+      return "hold_target";
+    case nx_control::TaskState::VehicleAccel:
+      return "vehicle_accel";
+    case nx_control::TaskState::VehicleCruise:
+      return "vehicle_cruise";
+    case nx_control::TaskState::VehicleDecel:
+      return "vehicle_decel";
+    case nx_control::TaskState::Safe:
+      return "safe";
+    case nx_control::TaskState::Fault:
+      return "fault";
+    case nx_control::TaskState::StandbyHold:
+      return "standby_hold";
+  }
+  return "unknown";
+}
+
+RuntimeCommandResult apply_runtime_command(
+    const nx_control::RuntimeCommand& command, double now_s,
+    nx_control::NxController& controller, RuntimeTaskState& runtime) {
+  RuntimeCommandResult result;
+  result.command = command;
+  if (command.type == nx_control::RuntimeCommandType::Invalid) {
+    result.ok = result.applied = false;
+    result.error_code = command.error_code.empty() ? "INVALID_COMMAND" : command.error_code;
+    result.message = "指令格式错误";
+    return result;
+  }
+  if (command.type == nx_control::RuntimeCommandType::Status) {
+    result.message = runtime.message;
+    return result;
+  }
+  if (command.type == nx_control::RuntimeCommandType::Stop) {
+    controller.stop_task();
+    runtime.running = false;
+    runtime.message = "任务" + runtime.active_task + "已停止";
+    result.message = runtime.message;
+    return result;
+  }
+  if (command.type == nx_control::RuntimeCommandType::Reset) {
+    controller.configure_task(nx_control::TaskMode::Contest45, 0.0, false, false);
+    controller.stop_task();
+    runtime.active_task = "5";
+    runtime.control_mode = "hold_center";
+    runtime.target_cm = 0.0;
+    runtime.running = false;
+    runtime.message = "已复位到任务5，等待开始";
+    result.message = runtime.message;
+    return result;
+  }
+  if (command.type == nx_control::RuntimeCommandType::Start) {
+    controller.start_task(now_s);
+    runtime.running = true;
+    runtime.message = "任务" + runtime.active_task + "已开始";
+    result.message = runtime.message;
+    return result;
+  }
+
+  nx_control::TaskMode mode = nx_control::TaskMode::Idle;
+  double target_m = 0.0;
+  if (command.task == "3") {
+    mode = nx_control::TaskMode::Contest3;
+  } else if (command.task == "4" || command.task == "5" ||
+             command.task == "45") {
+    mode = nx_control::TaskMode::Contest45;
+  } else if (command.task == "6") {
+    if (!command.target_cm.has_value()) {
+      result.ok = result.applied = false;
+      result.error_code = "TARGET_REQUIRED";
+      result.message = "任务6必须提供目标位置";
+      return result;
+    }
+    if (std::abs(*command.target_cm) > 10.0) {
+      result.ok = result.applied = false;
+      result.error_code = "TARGET_OUT_OF_RANGE";
+      result.message = "任务6目标必须在 -10 至 +10 cm";
+      return result;
+    }
+    mode = nx_control::TaskMode::Contest6;
+    target_m = *command.target_cm / 100.0;
+  } else {
+    result.ok = result.applied = false;
+    result.error_code = "INVALID_TASK";
+    result.message = "只能选择任务3、4、5或6";
+    return result;
+  }
+
+  controller.configure_task(mode, target_m, false, false);
+  controller.start_task(now_s);
+  runtime.active_task = command.task == "45" ? "5" : command.task;
+  runtime.control_mode = control_mode_name(mode);
+  runtime.target_cm = mode == nx_control::TaskMode::Contest3
+                          ? std::optional<double>{}
+                          : std::optional<double>{target_m * 100.0};
+  runtime.running = true;
+  if (mode == nx_control::TaskMode::Contest6) {
+    std::ostringstream message;
+    message << "任务6已启动，目标位置 " << std::fixed << std::setprecision(1)
+            << *runtime.target_cm << " cm";
+    runtime.message = message.str();
+  } else {
+    runtime.message = "任务" + runtime.active_task + "已启动";
+  }
+  result.message = runtime.message;
+  return result;
+}
+
+std::string runtime_response_json(
+    const RuntimeCommandResult& result, const RuntimeTaskState& runtime,
+    const nx_control::ControlOutput& output, const nx_control::ControlConfig& config) {
+  const bool vision_ok = std::isfinite(output.vision_age_ms) &&
+                         output.vision_age_ms <= config.vision_loss_hold_s * 1000.0;
+  const bool dmmc_ok = std::isfinite(output.dmmc_age_ms) &&
+                       output.dmmc_age_ms <= config.dmmc_stale_s * 1000.0 &&
+                       output.command.control_state != nx_control::TaskState::Fault;
+  const std::string requested_task =
+      result.command.task.empty() ? runtime.active_task : result.command.task;
+  std::ostringstream json;
+  json << std::boolalpha << std::setprecision(9)
+       << "{\"ok\":" << result.ok
+       << ",\"request_id\":\"" << nx_control::json_escape(result.command.request_id) << "\""
+       << ",\"requested_task\":\"" << nx_control::json_escape(requested_task) << "\""
+       << ",\"active_task\":\"" << nx_control::json_escape(runtime.active_task) << "\""
+       << ",\"control_mode\":\"" << nx_control::json_escape(runtime.control_mode) << "\""
+       << ",\"target_cm\":";
+  if (runtime.target_cm.has_value()) {
+    json << *runtime.target_cm;
+  } else {
+    json << "null";
+  }
+  json << ",\"running\":" << runtime.running
+       << ",\"applied\":" << result.applied
+       << ",\"controller_online\":true"
+       << ",\"controller_state\":\"" << task_state_name(output.command.control_state) << "\""
+       << ",\"ball_position_cm\":" << output.estimate.position_m * 100.0
+       << ",\"vision_ok\":" << vision_ok
+       << ",\"dmmc_ok\":" << dmmc_ok
+       << ",\"safety_latched\":" << output.safety_latched
+       << ",\"error_code\":\"" << nx_control::json_escape(result.error_code) << "\""
+       << ",\"last_error\":\"" << nx_control::json_escape(output.last_stop_reason) << "\""
+       << ",\"message\":\"" << nx_control::json_escape(result.message) << "\"}";
+  return json.str();
 }
 
 }  // namespace
@@ -197,11 +417,27 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, signal_handler);
     const nx_control::ControlConfig config = nx_control::load_config(options.config);
     nx_control::NxController controller(config);
-    std::cerr << "Controller: cascaded PID (NX position outer loop, MC02 angle inner loop)\n";
+    std::cerr << "Control architecture: NX 50 Hz position outer loop (20 ms) + "
+                 "DMMC02 1 kHz angle/motor inner loop (1 ms); serial command/status "
+                 "remain 50 Hz\n";
     const double started = nx_control::monotonic_seconds();
     controller.reset(started);
     controller.configure_task(options.task, options.target_m, options.start_immediately,
                               !options.key_start);
+    RuntimeTaskState runtime;
+    runtime.active_task = initial_task_name(options.task);
+    runtime.control_mode = control_mode_name(options.task);
+    runtime.target_cm = options.task == nx_control::TaskMode::Contest3
+                            ? std::optional<double>{}
+                            : std::optional<double>{options.target_m * 100.0};
+    runtime.running = options.start_immediately;
+    runtime.message = runtime.running ? "控制任务已启动" : "控制任务等待开始";
+    nx_control::LocalCommandServer command_server;
+    if (!command_server.open(options.command_socket)) {
+      throw std::runtime_error("cannot open command socket " + options.command_socket +
+                               ": " + command_server.last_error());
+    }
+    std::cerr << "runtime task socket: " << options.command_socket << '\n';
     KeyboardStart keyboard(options.key_start);
     if (options.key_start) {
       std::cerr << "keyboard start enabled: press d to start/restart the task\n";
@@ -240,10 +476,13 @@ int main(int argc, char** argv) {
     bool last_reported_safety_latched = false;
     std::uint64_t last_reported_safety_event_id = 0;
     std::uint32_t dry_sequence = 0;
+    nx_control::ControlOutput latest_output;
     while (!stopping.load()) {
       double now = nx_control::monotonic_seconds();
       if (keyboard.consume_start()) {
         controller.start_task(now);
+        runtime.running = true;
+        runtime.message = "任务" + runtime.active_task + "已由按键开始";
         std::cerr << "task started/restarted by key d\n";
       }
       while (vision_udp_enabled) {
@@ -278,6 +517,13 @@ int main(int argc, char** argv) {
       }
 
       if (now >= next_tick) {
+        std::optional<RuntimeCommandResult> runtime_command_result;
+        std::string runtime_command_payload;
+        if (command_server.receive(runtime_command_payload)) {
+          runtime_command_result = apply_runtime_command(
+              nx_control::parse_runtime_command(runtime_command_payload), now,
+              controller, runtime);
+        }
         if (options.dry_run) {
           latest_tube.sequence = ++dry_sequence;
           latest_tube.receive_time_s = now;
@@ -309,6 +555,7 @@ int main(int argc, char** argv) {
                 ? std::optional<std::uint32_t>(persistent_sequence->next())
                 : std::nullopt;
         const nx_control::ControlOutput output = controller.tick(now, command_id);
+        latest_output = output;
         const std::vector<std::uint8_t> packet =
             nx_control::protocol::encode_control_command(output.command);
         if (serial.fd() >= 0 && !serial.write_all(packet.data(), packet.size())) {
@@ -319,6 +566,19 @@ int main(int argc, char** argv) {
         }
         logger.write(now, output, have_tube ? &latest_tube : nullptr,
                      have_chassis ? &latest_chassis : nullptr);
+        if (runtime_command_result.has_value()) {
+          if (!command_server.reply(runtime_response_json(
+                  *runtime_command_result, runtime, latest_output, config))) {
+            std::cerr << "runtime command reply failed: "
+                      << command_server.last_error() << '\n';
+          } else {
+            std::cerr << "runtime command request_id="
+                      << runtime_command_result->command.request_id
+                      << " active_task=" << runtime.active_task
+                      << " applied=" << (runtime_command_result->applied ? 1 : 0)
+                      << " message=" << runtime_command_result->message << '\n';
+          }
+        }
         if (output.safety_event_id != last_reported_safety_event_id) {
           std::cerr << "SAFETY LATCHED event_id=" << output.safety_event_id
                     << " command_id=" << output.command.command_id

@@ -25,6 +25,7 @@ add_library(nx_control_core
     src/task_manager.cpp
     src/friction_compensator.cpp
     src/controller.cpp
+    src/runtime_command.cpp
     src/io.cpp
 )
 target_include_directories(nx_control_core PUBLIC include)
@@ -55,6 +56,10 @@ if(NX_CONTROL_BUILD_TESTS)
     enable_testing()
     add_executable(nx_control_tests tests/test_main.cpp)
     target_link_libraries(nx_control_tests PRIVATE nx_control_core)
+    target_compile_definitions(
+        nx_control_tests PRIVATE
+        NX_CONTROL_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
     add_test(NAME nx_control_tests COMMAND nx_control_tests)
     add_test(
         NAME nx_control_replay_smoke

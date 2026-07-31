@@ -51,6 +51,23 @@ void NxController::start_task(double now_s) {
   task_manager_.start(now_s);
 }
 
+void NxController::stop_task() {
+  task_manager_.stop();
+  previous_applied_u_ = 0.0;
+  previous_theta_command_rad_ = 0.0;
+  previous_model_compensation_rad_ = 0.0;
+  previous_model_compensation_active_ = false;
+  task3_early_brake_stage_ = -1;
+  task3_early_braking_active_ = false;
+  task3_early_braking_done_ = false;
+  task3_reverse_balance_active_ = false;
+  task3_reverse_balance_done_ = false;
+  friction_compensator_.reset();
+  inner_angle_warning_since_s_ = -1.0;
+  inner_angle_safe_since_s_ = -1.0;
+  pid_.reset();
+}
+
 void NxController::reset(double now_s) {
   observer_.reset(now_s);
   chassis_sync_.reset();
