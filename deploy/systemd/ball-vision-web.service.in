@@ -1,0 +1,34 @@
+[Unit]
+Description=Ball car Orbbec vision, inference, preview and task web API
+After=network-online.target ball-nx-control.service
+Wants=network-online.target
+Requires=ball-nx-control.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@CAR_USER@
+WorkingDirectory=@APP_ROOT@
+EnvironmentFile=/etc/ball-car/ball-car.env
+Environment=PYTHONUNBUFFERED=1
+UMask=0007
+ExecStart=/usr/bin/python3 @APP_ROOT@/run.py \
+  --no-serial \
+  --camera-backend sdk \
+  --position-mode rgbd \
+  --protocol tube-v3 \
+  --control-udp 127.0.0.1:29001 \
+  --web-host ${WEB_HOST} \
+  --web-port ${WEB_PORT} \
+  --web-control-socket /run/ball-nx/control.sock \
+  --web-control-timeout-ms 500 \
+  --web-jpeg-quality ${WEB_JPEG_QUALITY} \
+  --web-interval-ms ${WEB_INTERVAL_MS} \
+  --web-preview-width ${WEB_PREVIEW_WIDTH}
+Restart=always
+RestartSec=2
+TimeoutStopSec=15
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

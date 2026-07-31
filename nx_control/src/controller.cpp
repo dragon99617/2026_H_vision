@@ -342,17 +342,21 @@ ControlOutput NxController::tick(double now_s,
   output.settle_elapsed_ms = 1000.0 * task_manager_.settle_elapsed_s();
   const bool contest3_waiting_for_start =
       task_manager_.mode() == TaskMode::Contest3 && task_manager_.state() == TaskState::Idle;
+  const bool task_safety_active =
+      task_manager_.state() != TaskState::Idle || contest3_waiting_for_start;
   const bool target_hold_deadband = task_manager_.target_hold_deadband_active();
 
   const bool vision_soft_hold =
-      !contest3_waiting_for_start &&
+      task_safety_active && !contest3_waiting_for_start &&
       vision_age_s >= config_.vision_loss_hold_s &&
       vision_age_s <= config_.vision_loss_safe_s;
   const bool vision_hard_lost =
-      !contest3_waiting_for_start && vision_age_s > config_.vision_loss_safe_s;
+      task_safety_active && !contest3_waiting_for_start &&
+      vision_age_s > config_.vision_loss_safe_s;
   const bool chassis_stale = !chassis_valid;
   const bool chassis_fresh_required =
-      task_manager_.mode() != TaskMode::Contest3 && !camera_feedback_only;
+      task_safety_active && task_manager_.mode() != TaskMode::Contest3 &&
+      !camera_feedback_only;
   const bool chassis_gate_failed = chassis_fresh_required && chassis_stale;
   const bool force_safe_feedforward =
       vision_soft_hold || vision_hard_lost || chassis_gate_failed || safety_latched_;
@@ -364,7 +368,7 @@ ControlOutput NxController::tick(double now_s,
     output.request_stop = true;
     output.reason = "chassis_stale";
   }
-  if (dmmc_stale) {
+  if (task_safety_active && dmmc_stale) {
     output.request_stop = true;
     output.reason = "dmmc_stale_or_fault";
   }
@@ -406,7 +410,7 @@ ControlOutput NxController::tick(double now_s,
     output.request_slowdown = true;
   }
 
-  if (!dmmc_stale) {
+  if (task_safety_active && !dmmc_stale) {
     output.inner_angle_error_rad =
         tube_status_.theta_reference_rad - tube_status_.theta_actual_rad;
     const double abs_inner_error = std::abs(output.inner_angle_error_rad);
@@ -456,7 +460,7 @@ ControlOutput NxController::tick(double now_s,
         outside_soft_boundary ? "vision_lost_outside_soft_boundary"
                               : "vision_lost_predicted_soft_boundary";
   }
-  if (!contest3_waiting_for_start &&
+  if (task_safety_active && !contest3_waiting_for_start &&
       (std::abs(output.estimate.position_m) > config_.position_safe_limit_m ||
        (latest_visual_position_valid_ &&
         std::abs(latest_visual_position_m_) > config_.position_safe_limit_m))) {

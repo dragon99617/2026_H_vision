@@ -163,6 +163,20 @@ python3 run.py
 python3 run.py --no-serial
 ```
 
+装车时由同一个视觉进程共享最新相机帧并提供图传和任务按钮，避免网页进程
+第二次打开 Orbbec：
+
+```bash
+python3 run.py --no-serial --protocol tube-v3 \
+  --control-udp 127.0.0.1:29001 \
+  --web-host 0.0.0.0 --web-port 8080 \
+  --web-control-socket /run/ball-nx/control.sock
+```
+
+完整的上电自动热点、systemd 服务、安装和冷启动验收流程见
+[`deploy/README.md`](deploy/README.md)。正式装车不要同时运行独立的
+`snapshot_server.py`，否则它会与视觉进程争用同一台相机。
+
 纯 RGB 正式运行：
 
 ```bash
@@ -179,6 +193,9 @@ python3 run_rgb.py
 --no-serial         禁止串口发送
 --baud 921600       8N1 波特率
 --stats-interval 2  stderr 统计周期
+--web-port 8080     启用共享图传和任务 HTTP 服务；0 为关闭
+--web-control-socket PATH  ball_nx_control 本地命令套接字
+--web-preview-width 640    仅缩放网页预览，不改变推理输入
 --preview-scale N   仅 Debug 窗口缩放
 ```
 

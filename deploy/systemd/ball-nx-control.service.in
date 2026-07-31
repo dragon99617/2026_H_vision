@@ -1,0 +1,30 @@
+[Unit]
+Description=Ball car NX controller
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@CAR_USER@
+WorkingDirectory=@APP_ROOT@/nx_control
+EnvironmentFile=/etc/ball-car/ball-car.env
+RuntimeDirectory=ball-nx
+RuntimeDirectoryMode=0750
+StateDirectory=ball-nx
+StateDirectoryMode=0750
+LogsDirectory=ball-nx
+LogsDirectoryMode=0750
+UMask=0007
+ExecStart=@APP_ROOT@/nx_control/build/ball_nx_control \
+  --config @APP_ROOT@/nx_control/config/nx-control.conf \
+  --dmmc ${DMMC_DEVICE} \
+  --task idle \
+  --log /var/log/ball-nx/live.csv \
+  --state-file /var/lib/ball-nx/tube-control-v3.seq \
+  --command-socket /run/ball-nx/control.sock
+Restart=always
+RestartSec=1
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

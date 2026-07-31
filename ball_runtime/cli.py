@@ -29,6 +29,7 @@ from .tube_position_detector import TubePositionDetector
 from .tube_pose_worker import TubePoseWorker
 from .types import DetectionResult, FramePacket, RgbTubeState, TubeState
 from .visualize import draw_debug
+from .web_control import WebControlServer
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = PROJECT_DIR / "models/default.json"
@@ -89,6 +90,20 @@ def nonnegative_int(value: str) -> int:
     parsed = int(value)
     if parsed < 0:
         raise argparse.ArgumentTypeError("must be zero or greater")
+    return parsed
+
+
+def tcp_port(value: str) -> int:
+    parsed = int(value)
+    if not 0 <= parsed <= 65535:
+        raise argparse.ArgumentTypeError("must be between 0 and 65535")
+    return parsed
+
+
+def jpeg_quality(value: str) -> int:
+    parsed = int(value)
+    if not 1 <= parsed <= 100:
+        raise argparse.ArgumentTypeError("must be between 1 and 100")
     return parsed
 
 
@@ -155,6 +170,26 @@ def add_common_arguments(
     )
     parser.add_argument("--stats-interval", type=float, default=2.0)
     parser.add_argument("--max-seconds", type=float, default=0.0)
+    parser.add_argument(
+        "--web-host",
+        default="127.0.0.1",
+        help="HTTP preview/control bind address; enabled when --web-port is nonzero",
+    )
+    parser.add_argument(
+        "--web-port",
+        type=tcp_port,
+        default=0,
+        help="HTTP preview/control port, or 0 to disable",
+    )
+    parser.add_argument(
+        "--web-control-socket",
+        default="/run/ball-nx/control.sock",
+        help="local ball_nx_control Unix datagram socket",
+    )
+    parser.add_argument("--web-control-timeout-ms", type=positive_int, default=500)
+    parser.add_argument("--web-jpeg-quality", type=jpeg_quality, default=70)
+    parser.add_argument("--web-interval-ms", type=positive_int, default=50)
+    parser.add_argument("--web-preview-width", type=positive_int, default=640)
     parser.add_argument(
         "--metrics-json",
         type=Path,
@@ -236,6 +271,7 @@ class Runtime:
         self.control_writer: Optional[DatagramWriter] = None
         self.tube_pose_worker: Optional[TubePoseWorker] = None
         self.rgb_tube_worker: Optional[RgbTubeWorker] = None
+        self.web_server: Optional[WebControlServer] = None
         self.power_mode = read_power_mode()
         self.position_csv_handle = None
         self.position_csv_writer = None
@@ -463,6 +499,26 @@ class Runtime:
             self.stop_event,
             on_result=on_result,
         )
+        if self.args.web_port:
+            self.web_server = WebControlServer(
+                self.frames,
+                self.stop_event,
+                self.args.web_host,
+                self.args.web_port,
+                self.args.web_control_socket,
+                control_timeout_ms=self.args.web_control_timeout_ms,
+                jpeg_quality=self.args.web_jpeg_quality,
+                interval_ms=self.args.web_interval_ms,
+                preview_width=self.args.web_preview_width,
+            )
+            self.web_server.start()
+            host, port = self.web_server.address[:2]
+            print(
+                "web preview/control listening on http://%s:%d/ using %s"
+                % (host, port, self.args.web_control_socket),
+                file=sys.stderr,
+                flush=True,
+            )
         self.camera.start()
         if self.tube_pose_worker is not None:
             self.tube_pose_worker.start()
@@ -472,6 +528,9 @@ class Runtime:
 
     def stop(self) -> None:
         self.stop_event.set()
+        if self.web_server is not None:
+            self.web_server.stop()
+            self.web_server = None
         if self.camera is not None:
             self.camera.join()
         if self.inference is not None:

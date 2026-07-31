@@ -315,6 +315,12 @@ RuntimeCommandResult apply_runtime_command(
     return result;
   }
   if (command.type == nx_control::RuntimeCommandType::Start) {
+    if (runtime.active_task == "idle") {
+      result.ok = result.applied = false;
+      result.error_code = "NO_TASK_SELECTED";
+      result.message = "请先选择任务3、4、5或6";
+      return result;
+    }
     controller.start_task(now_s);
     runtime.running = true;
     runtime.message = "任务" + runtime.active_task + "已开始";
@@ -427,10 +433,14 @@ int main(int argc, char** argv) {
     RuntimeTaskState runtime;
     runtime.active_task = initial_task_name(options.task);
     runtime.control_mode = control_mode_name(options.task);
-    runtime.target_cm = options.task == nx_control::TaskMode::Contest3
-                            ? std::optional<double>{}
-                            : std::optional<double>{options.target_m * 100.0};
-    runtime.running = options.start_immediately;
+    if (options.task == nx_control::TaskMode::Contest3 ||
+        options.task == nx_control::TaskMode::Idle) {
+      runtime.target_cm.reset();
+    } else {
+      runtime.target_cm = options.target_m * 100.0;
+    }
+    runtime.running = options.start_immediately &&
+                      options.task != nx_control::TaskMode::Idle;
     runtime.message = runtime.running ? "控制任务已启动" : "控制任务等待开始";
     nx_control::LocalCommandServer command_server;
     if (!command_server.open(options.command_socket)) {

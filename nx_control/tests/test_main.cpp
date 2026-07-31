@@ -960,6 +960,19 @@ void test_controller_safety() {
         "predicted soft-boundary crossing during vision loss enters SAFE immediately");
 }
 
+void test_controller_power_on_idle_is_disabled_without_inputs() {
+  nx_control::ControlConfig config;
+  nx_control::NxController controller(config);
+  controller.reset(10.0);
+  controller.configure_task(nx_control::TaskMode::Idle, 0.0, true);
+
+  const auto output = controller.tick(10.02);
+  check(!output.safety_latched && !output.request_stop &&
+            output.command.control_state == nx_control::TaskState::Idle &&
+            std::abs(output.command.theta_cmd_rad) < 1e-12,
+        "power-on idle remains disabled while vision and DMMC are unavailable");
+}
+
 void test_controller_angle_limit() {
   nx_control::ControlConfig config;
   config.pid_kp_s2 = 10000.0;
@@ -1628,6 +1641,7 @@ int main() {
   test_task_manager();
   test_task3_friction_compensator();
   test_controller_safety();
+  test_controller_power_on_idle_is_disabled_without_inputs();
   test_controller_angle_limit();
   test_inner_angle_watchdog();
   test_controller_hold_deadband();
