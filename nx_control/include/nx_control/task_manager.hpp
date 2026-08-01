@@ -2,6 +2,7 @@
 
 #include "nx_control/types.hpp"
 
+#include <algorithm>
 #include <array>
 
 namespace nx_control {
@@ -21,10 +22,23 @@ class TaskManager {
                         bool feedback_valid = false);
   TaskState state() const { return state_; }
   TaskMode mode() const { return mode_; }
-  bool static_sequence_complete() const { return static_stage_ >= 2; }
+  bool static_sequence_complete() const {
+    return mode_ == TaskMode::Contest3 ? static_stage_ >= 3
+                                       : static_stage_ >= 2;
+  }
   bool target_hold_deadband_active() const { return target_hold_deadband_active_; }
   double target_m() const { return segment_target_m_; }
   int task3_stage() const { return mode_ == TaskMode::Contest3 ? static_stage_ : -1; }
+  bool task3_balance_active() const {
+    return mode_ == TaskMode::Contest3 && static_stage_ == 2 &&
+           state_ == TaskState::StaticMove;
+  }
+  double task3_balance_elapsed_s() const {
+    if (task3_balance_started_s_ < 0.0) return 0.0;
+    return static_stage_ >= 3
+               ? settle_elapsed_s_
+               : std::max(0.0, last_update_s_ - task3_balance_started_s_);
+  }
   bool settle_position_ok() const { return settle_position_ok_; }
   bool settle_velocity_ok() const { return settle_velocity_ok_; }
   bool settle_theta_ok() const { return settle_theta_ok_; }
@@ -59,6 +73,8 @@ class TaskManager {
   double last_update_s_ = 0.0;
   double stable_since_s_ = -1.0;
   double settle_elapsed_s_ = 0.0;
+  double task3_positive_reached_s_ = -1.0;
+  double task3_balance_started_s_ = -1.0;
   int static_stage_ = 0;
   std::uint16_t previous_events_ = 0;
   bool armed_ = false;

@@ -87,11 +87,8 @@ class NxController {
   double previous_model_compensation_rad_ = 0.0;
   bool previous_model_compensation_active_ = false;
   double contest_startup_start_s_ = -1.0;
-  int task3_early_brake_stage_ = -1;
-  bool task3_early_braking_active_ = false;
-  bool task3_early_braking_done_ = false;
   bool task3_reverse_balance_active_ = false;
-  bool task3_reverse_balance_done_ = false;
+  double task3_balance_rate_limit_rad_s_ = 0.0;
   double inner_angle_warning_since_s_ = -1.0;
   double inner_angle_safe_since_s_ = -1.0;
   bool safety_latched_ = false;

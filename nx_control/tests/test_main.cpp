@@ -421,9 +421,13 @@ void test_pid_controller() {
   check(std::abs(config.theta_rate_limit_rad_s -
                  3.0 * 3.14159265358979323846 / 180.0) < 1e-12,
         "NX default angle rate limit is 3 degrees per second");
-  check(std::abs(config.task3_reverse_balance_rate_limit_rad_s -
-                 (8.0 / 3.0) * 3.14159265358979323846 / 180.0) < 1e-12,
-        "Task 3 return-to-balance rate is two thirds of 4 degrees per second");
+  check(std::abs(config.task3_positive_reached_delay_s - 0.50) < 1e-12 &&
+            std::abs(config.task3_balance_transition_s - 0.30) < 1e-12 &&
+            std::abs(config.task3_balance_motor_position_rad -
+                     0.414473534) < 1e-12 &&
+            std::abs(config.task3_finish_position_min_m + 0.060) < 1e-12 &&
+            std::abs(config.task3_finish_position_max_m + 0.040) < 1e-12,
+        "Task 3 defaults use the timed zero-degree balance sequence");
   check(std::abs(config.inner_angle_warning_dwell_s - 0.20) < 1e-12 &&
             std::abs(config.inner_angle_safe_dwell_s - 0.50) < 1e-12,
         "inner-angle watchdog defaults remain 0.2 s warning and 0.5 s SAFE");
@@ -503,10 +507,8 @@ void test_deployed_timing_contract() {
   check(std::abs(config.theta_limit_rad -
                  4.0 * 3.14159265358979323846 / 180.0) < 1e-12 &&
             std::abs(config.theta_rate_limit_rad_s -
-                     3.0 * 3.14159265358979323846 / 180.0) < 1e-12 &&
-            std::abs(config.task3_reverse_balance_rate_limit_rad_s -
-                     (8.0 / 3.0) * 3.14159265358979323846 / 180.0) < 1e-12,
-        "deployed config preserves the 4 degree clamp and slower Task 3 return balancing");
+                     3.0 * 3.14159265358979323846 / 180.0) < 1e-12,
+        "deployed config preserves the 4 degree clamp and normal rate limit");
   check(std::abs(config.position_soft_limit_m - 0.085) < 1e-12 &&
             std::abs(config.position_safe_limit_m - 0.100) < 1e-12 &&
             std::abs(config.pid_kp_s2 - 6.0) < 1e-12 &&
@@ -527,12 +529,17 @@ void test_deployed_timing_contract() {
             std::abs(config.task3_reference_max_acceleration_m_s2 - 0.060) < 1e-12 &&
             std::abs(config.task3_reference_max_jerk_m_s3 - 0.150) < 1e-12 &&
             std::abs(config.task3_braking_deceleration_m_s2 - 0.150) < 1e-12 &&
-            std::abs(config.task3_early_brake_position_m - 0.040) < 1e-12 &&
             std::abs(config.task3_positive_early_brake_position_m - 0.035) < 1e-12 &&
             std::abs(config.task3_positive_reached_position_m - 0.040) < 1e-12 &&
             std::abs(config.task3_positive_overshoot_position_m - 0.045) < 1e-12 &&
-            std::abs(config.task3_positive_overshoot_deceleration_m_s2 - 0.200) < 1e-12,
-        "deployed config uses the requested slower Task 3 trajectory and earlier braking");
+            std::abs(config.task3_positive_overshoot_deceleration_m_s2 - 0.200) < 1e-12 &&
+            std::abs(config.task3_positive_reached_delay_s - 0.50) < 1e-12 &&
+            std::abs(config.task3_balance_transition_s - 0.30) < 1e-12 &&
+            std::abs(config.task3_balance_motor_position_rad -
+                     0.414473534) < 1e-12 &&
+            std::abs(config.task3_finish_position_min_m + 0.060) < 1e-12 &&
+            std::abs(config.task3_finish_position_max_m + 0.040) < 1e-12,
+        "deployed config uses the requested timed Task 3 balance sequence");
   check(std::abs(config.inner_angle_warning_rad -
                  1.0 * 3.14159265358979323846 / 180.0) < 1e-12 &&
             std::abs(config.inner_angle_safe_rad -
@@ -584,31 +591,6 @@ void test_task_manager() {
         "Task 3 quintic reference respects velocity, acceleration, and jerk limits");
   check(reference_continuity_ok,
         "Task 3 reference position, velocity, and acceleration remain continuous");
-  nx_control::TaskManager timed_task(config);
-  timed_task.configure(nx_control::TaskMode::Contest3, 0.0, true);
-  nx_control::ObserverState tracking_state;
-  nx_control::TubeStatus tracking_tube;
-  tracking_tube.theta_actual_rad = config.task3_theta_bias_rad;
-  nx_control::ReferencePoint tracking_reference =
-      timed_task.update(20.0, tracking_state, nullptr, &tracking_tube, true);
-  double reference_sequence_elapsed_s = -1.0;
-  for (int sample = 1; sample <= 360; ++sample) {
-    tracking_state.position_m = tracking_reference.position_m;
-    tracking_state.velocity_m_s = tracking_reference.velocity_m_s;
-    tracking_reference =
-        timed_task.update(20.0 + sample * config.period_s, tracking_state,
-                          nullptr, &tracking_tube, true);
-    if (timed_task.task3_stage() >= 1 &&
-        std::abs(tracking_reference.position_m + 0.05) < 1e-9 &&
-        std::abs(tracking_reference.velocity_m_s) < 1e-9) {
-      reference_sequence_elapsed_s = sample * config.period_s;
-      break;
-    }
-  }
-  check(reference_sequence_elapsed_s > 0.0 &&
-            reference_sequence_elapsed_s <= 7.2,
-        "Task 3 perfect-tracking reference completes 0 -> +5 -> -5 cm within 7.2 seconds");
-
   state = nx_control::ObserverState{0.0400, 0.050, 0.0};
   tube.theta_actual_rad =
       config.task3_theta_bias_rad +
@@ -636,41 +618,58 @@ void test_task_manager() {
             return_reference.velocity_m_s < 0.0,
         "Task 3 return reference begins smoothly and heads toward -5 cm");
 
+  const auto before_balance =
+      task.update(5.699, state, nullptr, &tube, true);
+  check(task.task3_stage() == 1 && !task.task3_balance_active() &&
+            before_balance.velocity_m_s < 0.0,
+        "Task 3 keeps the return controller active before the 0.5 second timer expires");
+
+  const auto frozen_reference =
+      task.update(5.701, state, nullptr, &tube, true);
+  check(task.task3_stage() == 2 && task.task3_balance_active() &&
+            std::abs(frozen_reference.velocity_m_s) < 1e-12 &&
+            std::abs(frozen_reference.acceleration_m_s2) < 1e-12,
+        "Task 3 suspends its reference trajectory at the 0.5 second boundary");
+
+  state.position_m = -0.05;
+  tube.motor_position_rad = config.task3_balance_motor_position_rad;
+  const auto held_reference =
+      task.update(5.99, state, nullptr, &tube, true);
+  check(!task.static_sequence_complete() && task.task3_balance_active() &&
+            std::abs(held_reference.position_m -
+                     frozen_reference.position_m) < 1e-12,
+        "Task 3 cannot finish before the 0.3 second zero-degree transition completes");
+
+  task.update(6.002, state, nullptr, &tube, true);
+  check(task.static_sequence_complete() &&
+            task.state() == nx_control::TaskState::Idle &&
+            std::abs(task.target_m() + 0.05) < 1e-12 &&
+            !task.target_hold_deadband_active(),
+        "contest task 3 ends after the balance transition and entry into the -6 to -4 cm interval");
+
+  nx_control::TaskManager hold_task(config);
+  hold_task.configure(nx_control::TaskMode::HoldTarget, -0.05, true);
   state.position_m = -0.05;
   state.velocity_m_s = 0.0;
-  tube.theta_actual_rad =
-      config.task3_theta_bias_rad +
-      config.task3_settle_theta_tolerance_rad + 1e-4;
-  task.update(15.50, state, nullptr, &tube, true);
-  check(!task.static_sequence_complete() && !task.settle_theta_ok(),
-        "Task 3 final -5 cm stage still requires actual tube angle settling");
-
-  tube.theta_actual_rad = config.task3_theta_bias_rad;
-  task.update(15.60, state, nullptr, &tube, true);
-  check(task.static_sequence_complete() &&
-            task.state() == nx_control::TaskState::HoldTarget &&
-            std::abs(task.target_m() + 0.05) < 1e-12 &&
-            task.target_hold_deadband_active(),
-        "contest task 3 holds -5 cm immediately after all final conditions pass");
-
+  hold_task.update(1.9, state, nullptr);
   state.position_m = -0.044;
   state.velocity_m_s = 0.050;
-  task.update(2.0, state, nullptr);
-  check(task.state() == nx_control::TaskState::HoldTarget &&
-            task.target_hold_deadband_active(),
+  hold_task.update(2.0, state, nullptr);
+  check(hold_task.state() == nx_control::TaskState::HoldTarget &&
+            hold_task.target_hold_deadband_active(),
         "HoldTarget deadband remains active inside the 8 mm exit threshold");
   state.position_m = -0.041;
-  task.update(2.1, state, nullptr);
-  check(!task.target_hold_deadband_active(),
+  hold_task.update(2.1, state, nullptr);
+  check(!hold_task.target_hold_deadband_active(),
         "HoldTarget deadband exits when position error exceeds 8 mm");
   state.position_m = -0.047;
   state.velocity_m_s = 0.016;
-  task.update(2.2, state, nullptr);
-  check(!task.target_hold_deadband_active(),
+  hold_task.update(2.2, state, nullptr);
+  check(!hold_task.target_hold_deadband_active(),
         "HoldTarget deadband does not enter above 15 mm/s");
   state.velocity_m_s = 0.014;
-  task.update(2.3, state, nullptr);
-  check(task.target_hold_deadband_active(),
+  hold_task.update(2.3, state, nullptr);
+  check(hold_task.target_hold_deadband_active(),
         "HoldTarget deadband enters inside 4 mm below 15 mm/s");
 
   nx_control::ChassisState chassis;
@@ -1568,6 +1567,8 @@ void test_controller_task3_position_early_braking() {
   bool braked_before_threshold = false;
   bool saw_positive_braking_after_threshold = false;
   bool saw_positive_overshoot_recovery = false;
+  bool saw_timed_balance_entry = false;
+  bool timed_balance_rate_ok = true;
   double strongest_normal_braking_theta_rad = 0.0;
   double strongest_overshoot_theta_rad = 0.0;
   for (std::uint32_t sequence = 1; sequence <= 80; ++sequence) {
@@ -1595,7 +1596,20 @@ void test_controller_task3_position_early_braking() {
     vision.receive_time_s = now_s;
     controller.ingest_vision(vision);
 
+    const double theta_before_tick_rad = feedback_theta_rad;
     output = controller.tick(now_s);
+    if (output.task3_reverse_balance_active &&
+        !saw_timed_balance_entry) {
+      saw_timed_balance_entry = true;
+      constexpr double kOneCentidegreeRad =
+          3.14159265358979323846 / 18000.0;
+      timed_balance_rate_ok =
+          std::abs(output.command.theta_cmd_rad) < 1e-12 &&
+          output.command.theta_rate_limit_rad_s *
+                      config.task3_balance_transition_s +
+                  kOneCentidegreeRad >=
+              std::abs(theta_before_tick_rad);
+    }
     feedback_theta_rad = output.command.theta_cmd_rad;
     if (output.estimate.position_m <
         config.task3_positive_early_brake_position_m - 0.001) {
@@ -1631,10 +1645,10 @@ void test_controller_task3_position_early_braking() {
                     0.05 * 3.14159265358979323846 / 180.0,
         "Task 3 applies a moderately stronger reverse command beyond +5.0 cm");
 
-  bool saw_reverse_balance = false;
-  bool reverse_balance_command_ok = true;
-  bool saw_speed_control_after_balance = false;
-  for (std::uint32_t sequence = 81; sequence <= 145; ++sequence) {
+  bool saw_zero_balance = false;
+  bool zero_balance_command_ok = true;
+  bool saw_task_end_in_interval = false;
+  for (std::uint32_t sequence = 81; sequence <= 220; ++sequence) {
     const double now_s = 300.0 + sequence * config.period_s;
     const auto now_ms =
         static_cast<std::uint32_t>(std::llround(now_s * 1000.0));
@@ -1642,7 +1656,9 @@ void test_controller_task3_position_early_braking() {
     nx_control::TubeStatus tube;
     tube.sequence = sequence;
     tube.dmmc_time_ms = now_ms;
+    tube.theta_reference_rad = feedback_theta_rad;
     tube.theta_actual_rad = feedback_theta_rad;
+    tube.motor_position_rad = config.task3_balance_motor_position_rad;
     tube.receive_time_s = now_s;
     controller.ingest_tube_status(tube);
 
@@ -1659,33 +1675,31 @@ void test_controller_task3_position_early_braking() {
 
     output = controller.tick(now_s);
     if (output.task3_reverse_balance_active) {
-      saw_reverse_balance = true;
-      reverse_balance_command_ok =
-          reverse_balance_command_ok &&
+      saw_zero_balance = true;
+      zero_balance_command_ok =
+          zero_balance_command_ok &&
           std::abs(output.theta_pid_rad) < 1e-12 &&
+          std::abs(output.theta_bias_rad) < 1e-12 &&
           std::abs(output.theta_friction_rad) < 1e-12 &&
           output.pid.integrator_frozen &&
-          std::abs(output.command.theta_rate_limit_rad_s -
-                   config.task3_reverse_balance_rate_limit_rad_s) < 1e-12 &&
-          std::abs(output.command.theta_cmd_rad -
-                   config.task3_theta_bias_rad) <=
-              std::abs(feedback_theta_rad -
-                       config.task3_theta_bias_rad) +
-                  1e-12;
-    } else if (saw_reverse_balance &&
-               std::abs(feedback_theta_rad -
-                        config.task3_theta_bias_rad) <=
-                   config.task3_settle_theta_tolerance_rad) {
-      saw_speed_control_after_balance =
-          std::abs(output.command.theta_rate_limit_rad_s -
-                   config.theta_rate_limit_rad_s) < 1e-12;
+          output.command.theta_rate_limit_rad_s > 0.0 &&
+          std::abs(output.command.theta_cmd_rad) < 1e-12 &&
+          std::abs(output.task3_balance_motor_error_rad) < 1e-12;
+    } else if (saw_zero_balance && output.task3_stage == 3 &&
+               output.command.control_state == nx_control::TaskState::Idle &&
+               output.estimate.position_m >=
+                   config.task3_finish_position_min_m &&
+               output.estimate.position_m <=
+                   config.task3_finish_position_max_m) {
+      saw_task_end_in_interval = true;
     }
     feedback_theta_rad = output.command.theta_cmd_rad;
   }
-  check(saw_reverse_balance && reverse_balance_command_ok,
-        "Task 3 detects robust negative velocity and returns directly to balance at two-thirds speed");
-  check(saw_speed_control_after_balance,
-        "Task 3 exits the one-shot balance phase and restores normal speed control");
+  check(saw_timed_balance_entry && timed_balance_rate_ok &&
+            saw_zero_balance && zero_balance_command_ok,
+        "Task 3 suspends PID and continuously commands the DMMC 0-degree balance pose");
+  check(saw_task_end_in_interval,
+        "Task 3 ends when the ball enters the -6 to -4 cm interval after balancing");
 }
 
 void test_csv_task3_diagnostics() {
@@ -1718,12 +1732,13 @@ void test_csv_task3_diagnostics() {
   std::string row;
   std::getline(stream, header);
   std::getline(stream, row);
-  const std::array<const char*, 39> required_fields{
+  const std::array<const char*, 41> required_fields{
       "task3_stage",       "planned_x_m",       "planned_v_m_s",
       "planned_a_m_s2",    "settle_position_ok", "settle_velocity_ok",
       "settle_theta_ok",    "settle_elapsed_ms", "task3_early_braking",
       "task3_positive_overshoot_recovery",
       "task3_reverse_balance_active",
+      "task3_balance_elapsed_ms", "task3_balance_motor_error_rad",
       "contest_startup_active", "contest_startup_elapsed_s",
       "contest_startup_target_rpm", "contest_startup_speed_ref_rpm",
       "contest_startup_acceleration_m_s2",

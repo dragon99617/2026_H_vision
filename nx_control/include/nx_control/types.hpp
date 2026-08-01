@@ -166,6 +166,9 @@ struct ControlOutput {
   bool task3_early_braking = false;
   bool task3_positive_overshoot_recovery = false;
   bool task3_reverse_balance_active = false;
+  double task3_balance_elapsed_ms = 0.0;
+  double task3_balance_motor_error_rad =
+      std::numeric_limits<double>::infinity();
   double u_command_m_s2 = 0.0;
   double theta_pid_rad = 0.0;
   double theta_bias_rad = 0.0;
@@ -245,14 +248,16 @@ struct ControlConfig {
   double task3_friction_blend_time_s = 0.20;
   double task3_friction_breakaway_timeout_s = 0.75;
   double task3_braking_deceleration_m_s2 = 0.150;
-  double task3_early_brake_position_m = 0.040;
   double task3_positive_early_brake_position_m = 0.035;
   double task3_positive_reached_position_m = 0.040;
   double task3_positive_overshoot_position_m = 0.045;
   double task3_positive_overshoot_deceleration_m_s2 = 0.200;
-  double task3_positive_reverse_velocity_m_s = 0.020;
-  double task3_reverse_balance_rate_limit_rad_s =
-      (8.0 / 3.0) * 3.14159265358979323846 / 180.0;
+  double task3_positive_reached_delay_s = 0.50;
+  double task3_balance_transition_s = 0.30;
+  double task3_balance_motor_position_rad = 0.414473534;
+  double task3_balance_motor_tolerance_rad = 0.005;
+  double task3_finish_position_min_m = -0.060;
+  double task3_finish_position_max_m = -0.040;
   double task3_friction_rolling_enter_velocity_m_s = 0.010;
   double task3_friction_stationary_enter_velocity_m_s = 0.005;
   double task3_friction_disable_position_error_m = 0.0025;

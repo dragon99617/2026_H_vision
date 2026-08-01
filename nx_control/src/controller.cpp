@@ -45,11 +45,8 @@ void NxController::start_task(double now_s) {
   previous_theta_command_rad_ = 0.0;
   previous_model_compensation_rad_ = 0.0;
   previous_model_compensation_active_ = false;
-  task3_early_brake_stage_ = -1;
-  task3_early_braking_active_ = false;
-  task3_early_braking_done_ = false;
   task3_reverse_balance_active_ = false;
-  task3_reverse_balance_done_ = false;
+  task3_balance_rate_limit_rad_s_ = 0.0;
   visual_position_filter_initialized_ = false;
   friction_compensator_.reset();
   inner_angle_warning_since_s_ = -1.0;
@@ -67,11 +64,8 @@ void NxController::stop_task() {
   previous_model_compensation_rad_ = 0.0;
   previous_model_compensation_active_ = false;
   contest_startup_start_s_ = -1.0;
-  task3_early_brake_stage_ = -1;
-  task3_early_braking_active_ = false;
-  task3_early_braking_done_ = false;
   task3_reverse_balance_active_ = false;
-  task3_reverse_balance_done_ = false;
+  task3_balance_rate_limit_rad_s_ = 0.0;
   friction_compensator_.reset();
   inner_angle_warning_since_s_ = -1.0;
   inner_angle_safe_since_s_ = -1.0;
@@ -99,11 +93,8 @@ void NxController::reset(double now_s) {
   previous_model_compensation_rad_ = 0.0;
   previous_model_compensation_active_ = false;
   contest_startup_start_s_ = -1.0;
-  task3_early_brake_stage_ = -1;
-  task3_early_braking_active_ = false;
-  task3_early_braking_done_ = false;
   task3_reverse_balance_active_ = false;
-  task3_reverse_balance_done_ = false;
+  task3_balance_rate_limit_rad_s_ = 0.0;
   friction_compensator_.reset();
   inner_angle_warning_since_s_ = -1.0;
   inner_angle_safe_since_s_ = -1.0;
@@ -398,12 +389,22 @@ ControlOutput NxController::tick(double now_s,
                            have_tube_status_ ? &tube_status_ : nullptr,
                            task_feedback_valid);
   output.task3_stage = task_manager_.task3_stage();
+  const bool task3_balance_active = task_manager_.task3_balance_active();
+  output.task3_balance_elapsed_ms =
+      1000.0 * task_manager_.task3_balance_elapsed_s();
+  output.task3_balance_motor_error_rad =
+      have_tube_status_
+          ? tube_status_.motor_position_rad -
+                config_.task3_balance_motor_position_rad
+          : std::numeric_limits<double>::infinity();
   output.settle_position_ok = task_manager_.settle_position_ok();
   output.settle_velocity_ok = task_manager_.settle_velocity_ok();
   output.settle_theta_ok = task_manager_.settle_theta_ok();
   output.settle_elapsed_ms = 1000.0 * task_manager_.settle_elapsed_s();
   const bool contest3_waiting_for_start =
-      task_manager_.mode() == TaskMode::Contest3 && task_manager_.state() == TaskState::Idle;
+      task_manager_.mode() == TaskMode::Contest3 &&
+      task_manager_.state() == TaskState::Idle &&
+      task_manager_.task3_stage() == 0;
   const bool task_safety_active =
       task_manager_.state() != TaskState::Idle || contest3_waiting_for_start;
   const bool target_hold_deadband =
@@ -438,7 +439,7 @@ ControlOutput NxController::tick(double now_s,
 
   const bool pid_active =
       !force_safe_feedforward && !dmmc_stale &&
-      task_manager_.state() != TaskState::Idle;
+      task_manager_.state() != TaskState::Idle && !task3_balance_active;
   if (!pid_active) pid_.reset();
   output.pid = pid_.calculate(output.estimate, output.reference,
                               chassis_acceleration,
@@ -548,7 +549,7 @@ ControlOutput NxController::tick(double now_s,
 
   const bool force_zero_command =
       safety_latched_ || vision_soft_hold || dmmc_stale ||
-      contest3_waiting_for_start || !pid_active;
+      contest3_waiting_for_start || (!pid_active && !task3_balance_active);
   if (force_zero_command) requested_u = 0.0;
 
   const bool task3_compensation_active =
@@ -561,58 +562,25 @@ ControlOutput NxController::tick(double now_s,
       task3_compensation_active &&
       task_manager_.state() == TaskState::StaticMove &&
       (task3_stage == 0 || task3_stage == 1);
-  // The positive pass is handled independently so braking can continue across
-  // the stage-0 -> stage-1 transition at +4 cm. The latched one-shot remains
-  // dedicated to the negative pass.
-  if (!task3_move_active || task3_stage != 1) {
-    task3_early_brake_stage_ = -1;
-    task3_early_braking_active_ = false;
-    task3_early_braking_done_ = false;
-  } else {
-    if (task3_stage != task3_early_brake_stage_) {
-      task3_early_brake_stage_ = task3_stage;
-      task3_early_braking_active_ = false;
-      task3_early_braking_done_ = false;
-    }
-    constexpr int motion_direction = -1;
-    if (!task3_early_braking_active_ &&
-        !task3_early_braking_done_ &&
-        motion_direction * output.estimate.position_m >=
-            config_.task3_early_brake_position_m &&
-        motion_direction * output.estimate.velocity_m_s >
-            config_.task3_settle_velocity_m_s) {
-      task3_early_braking_active_ = true;
-    }
-    if (task3_early_braking_active_) {
-      const double forward_velocity_m_s =
-          motion_direction * output.estimate.velocity_m_s;
-      if (forward_velocity_m_s <= config_.task3_settle_velocity_m_s) {
-        task3_early_braking_active_ = false;
-        task3_early_braking_done_ = true;
-      }
-    }
-  }
-  if (!task3_move_active || task3_stage != 1) {
+  if (task3_balance_active && !task3_reverse_balance_active_) {
+    task3_reverse_balance_active_ = true;
+    const double initial_angle_rad =
+        have_tube_status_
+            ? std::max({std::abs(previous_theta_command_rad_),
+                        std::abs(tube_status_.theta_reference_rad),
+                        std::abs(tube_status_.theta_actual_rad)})
+            : std::abs(previous_theta_command_rad_);
+    constexpr double kOneCentidegreeRad =
+        3.14159265358979323846 / 18000.0;
+    const double required_rate_rad_s =
+        initial_angle_rad / config_.task3_balance_transition_s;
+    task3_balance_rate_limit_rad_s_ =
+        std::max(kOneCentidegreeRad,
+                 std::ceil(required_rate_rad_s / kOneCentidegreeRad) *
+                     kOneCentidegreeRad);
+  } else if (!task3_balance_active) {
     task3_reverse_balance_active_ = false;
-    task3_reverse_balance_done_ = false;
-  } else if (task3_early_braking_active_) {
-    // The one-shot -4 cm emergency brake has priority over return balancing
-    // phase if the latter has not completed in time.
-    task3_reverse_balance_active_ = false;
-    task3_reverse_balance_done_ = true;
-  } else if (!task3_reverse_balance_done_) {
-    if (!task3_reverse_balance_active_) {
-      if (output.estimate.velocity_m_s <=
-          -config_.task3_positive_reverse_velocity_m_s) {
-        task3_reverse_balance_active_ = true;
-      }
-    } else if (have_tube_status_ &&
-               std::abs(tube_status_.theta_actual_rad -
-                        config_.task3_theta_bias_rad) <=
-                   config_.task3_settle_theta_tolerance_rad) {
-      task3_reverse_balance_active_ = false;
-      task3_reverse_balance_done_ = true;
-    }
+    task3_balance_rate_limit_rad_s_ = 0.0;
   }
   const bool task3_positive_approach_braking =
       task3_move_active && !task3_reverse_balance_active_ &&
@@ -632,15 +600,12 @@ ControlOutput NxController::tick(double now_s,
         config_.task3_positive_overshoot_deceleration_m_s2;
   } else if (task3_positive_approach_braking) {
     task3_braking_direction = 1;
-  } else if (task3_early_braking_active_) {
-    // Once the measured return crosses -4 cm, command acceleration opposite
-    // to travel until the ball has slowed to the settle-speed band.
-    task3_braking_direction = -1;
   }
   const bool task3_braking_active = task3_braking_direction != 0;
-  if (task3_reverse_balance_active_) {
-    // Zero dynamic acceleration and remove friction feedforward below so the
-    // absolute command goes straight to the calibrated balance bias.
+  if (task3_balance_active) {
+    // Suspend the position controller while DMMC moves to its 0-degree pose.
+    // DMMC's local inverse kinematics maps this tube target to the calibrated
+    // 0.414473534 rad motor balance position.
     requested_u = 0.0;
   } else if (task3_braking_active) {
     requested_u =
@@ -651,7 +616,7 @@ ControlOutput NxController::tick(double now_s,
       task_manager_.target_m() - output.estimate.position_m;
   const FrictionCompensation friction = friction_compensator_.update(
       now_s,
-      task3_compensation_active && !task3_reverse_balance_active_,
+      task3_compensation_active && !task3_balance_active,
       target_position_error_m,
       output.estimate.velocity_m_s, requested_u,
       task3_braking_active ? 0.0 : output.reference.velocity_m_s);
@@ -660,20 +625,26 @@ ControlOutput NxController::tick(double now_s,
   const double theta_pid_rad =
       force_zero_command ? 0.0 : std::atan2(requested_u, kGravity);
   const double theta_bias_rad =
-      task3_compensation_active ? config_.task3_theta_bias_rad : 0.0;
+      task3_compensation_active && !task3_balance_active
+          ? config_.task3_theta_bias_rad
+          : 0.0;
   const double theta_friction_rad =
-      task3_compensation_active ? friction.theta_friction_rad : 0.0;
+      task3_compensation_active && !task3_balance_active
+          ? friction.theta_friction_rad
+          : 0.0;
   const double desired_theta_rad =
       theta_pid_rad + theta_bias_rad + theta_friction_rad;
   const double theta_rate_limit_rad_s =
-      task3_reverse_balance_active_
-          ? config_.task3_reverse_balance_rate_limit_rad_s
+      task3_balance_active
+          ? task3_balance_rate_limit_rad_s_
           : config_.theta_rate_limit_rad_s;
   const double theta_command_rad =
       force_zero_command
           ? 0.0
-          : rate_limit_final_angle(desired_theta_rad,
-                                   theta_rate_limit_rad_s);
+          : (task3_balance_active
+                 ? 0.0
+                 : rate_limit_final_angle(desired_theta_rad,
+                                          theta_rate_limit_rad_s));
 
   const double applied_dynamic_theta_rad =
       theta_command_rad - theta_bias_rad - theta_friction_rad;
@@ -682,7 +653,7 @@ ControlOutput NxController::tick(double now_s,
           ? 0.0
           : kGravity * std::tan(applied_dynamic_theta_rad);
   const bool pid_forced_override =
-      target_hold_deadband || task3_reverse_balance_active_ || task3_braking_active ||
+      target_hold_deadband || task3_balance_active || task3_braking_active ||
       friction.target_deadband || startup.active;
   if (force_zero_command) {
     pid_.reset();
@@ -696,9 +667,12 @@ ControlOutput NxController::tick(double now_s,
 
   previous_applied_u_ = applied_u;
   previous_theta_command_rad_ = theta_command_rad;
-  previous_model_compensation_active_ = task3_compensation_active;
+  previous_model_compensation_active_ =
+      task3_compensation_active && !task3_balance_active;
   previous_model_compensation_rad_ =
-      task3_compensation_active ? theta_bias_rad + theta_friction_rad : 0.0;
+      previous_model_compensation_active_
+          ? theta_bias_rad + theta_friction_rad
+          : 0.0;
   output.u_command_m_s2 = applied_u;
   output.theta_pid_rad = theta_pid_rad;
   output.theta_bias_rad = theta_bias_rad;
@@ -709,7 +683,7 @@ ControlOutput NxController::tick(double now_s,
   output.task3_positive_overshoot_recovery =
       task3_positive_overshoot_recovery;
   output.task3_reverse_balance_active =
-      task3_reverse_balance_active_;
+      task3_balance_active;
   output.safety_latched = safety_latched_;
   output.safety_event_id = safety_event_id_;
   output.last_stop_reason = last_stop_reason_;

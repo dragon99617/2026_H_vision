@@ -81,6 +81,8 @@ void TaskManager::configure(TaskMode mode, double target_m, bool start_immediate
   static_stage_ = 0;
   stable_since_s_ = -1.0;
   settle_elapsed_s_ = 0.0;
+  task3_positive_reached_s_ = -1.0;
+  task3_balance_started_s_ = -1.0;
   settle_position_ok_ = settle_velocity_ok_ = settle_theta_ok_ = false;
   previous_events_ = 0;
   armed_ = true;
@@ -102,6 +104,8 @@ void TaskManager::start(double now_s) {
   last_update_s_ = now_s;
   stable_since_s_ = -1.0;
   settle_elapsed_s_ = 0.0;
+  task3_positive_reached_s_ = -1.0;
+  task3_balance_started_s_ = -1.0;
   settle_position_ok_ = settle_velocity_ok_ = settle_theta_ok_ = false;
   static_stage_ = 0;
   target_hold_deadband_active_ = false;
@@ -141,6 +145,8 @@ void TaskManager::stop() {
   target_hold_deadband_active_ = false;
   stable_since_s_ = -1.0;
   settle_elapsed_s_ = 0.0;
+  task3_positive_reached_s_ = -1.0;
+  task3_balance_started_s_ = -1.0;
   settle_position_ok_ = settle_velocity_ok_ = settle_theta_ok_ = false;
 }
 
@@ -231,7 +237,8 @@ ReferencePoint TaskManager::update(double now_s, const ObserverState& estimate,
     const std::uint16_t rising = static_cast<std::uint16_t>(chassis->events & ~previous_events_);
     previous_events_ = chassis->events;
     if (start_on_chassis_event_ && (rising & 0x0001U) != 0U &&
-        state_ == TaskState::Idle) {
+        state_ == TaskState::Idle &&
+        !(mode_ == TaskMode::Contest3 && static_stage_ >= 3)) {
       start(now_s);
     }
   }
@@ -242,17 +249,67 @@ ReferencePoint TaskManager::update(double now_s, const ObserverState& estimate,
       static_segment_.start_s = now_s;
       segment_clock_started_ = true;
     }
-    current_reference_ = evaluate_segment(now_s);
-    if (mode_ == TaskMode::Contest3 && static_stage_ == 0 &&
-        estimate.position_m >
-            config_.task3_positive_reached_position_m) {
-      settle_position_ok_ = true;
-      settle_velocity_ok_ = true;
-      settle_theta_ok_ = true;
-      stable_since_s_ = -1.0;
-      settle_elapsed_s_ = 0.0;
-      static_stage_ = 1;
-      begin_static_segment(now_s, current_reference_, -0.05);
+    if (!(mode_ == TaskMode::Contest3 && static_stage_ == 2)) {
+      current_reference_ = evaluate_segment(now_s);
+    }
+    if (mode_ == TaskMode::Contest3) {
+      if (static_stage_ == 0) {
+        settle_position_ok_ =
+            estimate.position_m >
+            config_.task3_positive_reached_position_m;
+        settle_velocity_ok_ = true;
+        settle_theta_ok_ = true;
+        settle_elapsed_s_ = 0.0;
+        if (settle_position_ok_) {
+          static_stage_ = 1;
+          task3_positive_reached_s_ = now_s;
+          begin_static_segment(now_s, current_reference_, -0.05);
+        }
+        return current_reference_;
+      }
+
+      if (static_stage_ == 1) {
+        settle_position_ok_ = false;
+        settle_velocity_ok_ = false;
+        settle_theta_ok_ = false;
+        settle_elapsed_s_ =
+            std::max(0.0, now_s - task3_positive_reached_s_);
+        if (task3_positive_reached_s_ >= 0.0 &&
+            settle_elapsed_s_ >= config_.task3_positive_reached_delay_s) {
+          // Suspend the return trajectory. The controller now owns the output
+          // and commands a timed transition to the DMMC 0-degree balance pose.
+          current_reference_.velocity_m_s = 0.0;
+          current_reference_.acceleration_m_s2 = 0.0;
+          static_stage_ = 2;
+          task3_balance_started_s_ = now_s;
+          settle_elapsed_s_ = 0.0;
+        }
+        return current_reference_;
+      }
+
+      if (static_stage_ == 2) {
+        current_reference_.velocity_m_s = 0.0;
+        current_reference_.acceleration_m_s2 = 0.0;
+        settle_position_ok_ =
+            estimate.position_m >= config_.task3_finish_position_min_m &&
+            estimate.position_m <= config_.task3_finish_position_max_m;
+        settle_velocity_ok_ = true;
+        settle_theta_ok_ =
+            feedback_valid && tube_status != nullptr &&
+            std::abs(tube_status->motor_position_rad -
+                     config_.task3_balance_motor_position_rad) <=
+                config_.task3_balance_motor_tolerance_rad;
+        settle_elapsed_s_ =
+            std::max(0.0, now_s - task3_balance_started_s_);
+        if (settle_elapsed_s_ >= config_.task3_balance_transition_s &&
+            settle_position_ok_) {
+          static_stage_ = 3;
+          state_ = TaskState::Idle;
+          current_reference_ = ReferencePoint{};
+        }
+        return current_reference_;
+      }
+
       return current_reference_;
     }
     settle_position_ok_ =

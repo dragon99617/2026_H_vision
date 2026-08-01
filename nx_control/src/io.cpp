@@ -228,8 +228,6 @@ ControlConfig load_config(const std::string& path) {
          config.task3_friction_breakaway_timeout_s);
   number("task3_braking_deceleration_m_s2",
          config.task3_braking_deceleration_m_s2);
-  number("task3_early_brake_position_m",
-         config.task3_early_brake_position_m);
   number("task3_positive_early_brake_position_m",
          config.task3_positive_early_brake_position_m);
   number("task3_positive_reached_position_m",
@@ -238,10 +236,18 @@ ControlConfig load_config(const std::string& path) {
          config.task3_positive_overshoot_position_m);
   number("task3_positive_overshoot_deceleration_m_s2",
          config.task3_positive_overshoot_deceleration_m_s2);
-  number("task3_positive_reverse_velocity_m_s",
-         config.task3_positive_reverse_velocity_m_s);
-  number("task3_reverse_balance_rate_limit_rad_s",
-         config.task3_reverse_balance_rate_limit_rad_s);
+  number("task3_positive_reached_delay_s",
+         config.task3_positive_reached_delay_s);
+  number("task3_balance_transition_s",
+         config.task3_balance_transition_s);
+  number("task3_balance_motor_position_rad",
+         config.task3_balance_motor_position_rad);
+  number("task3_balance_motor_tolerance_rad",
+         config.task3_balance_motor_tolerance_rad);
+  number("task3_finish_position_min_m",
+         config.task3_finish_position_min_m);
+  number("task3_finish_position_max_m",
+         config.task3_finish_position_max_m);
   number("task3_friction_rolling_enter_velocity_m_s",
          config.task3_friction_rolling_enter_velocity_m_s);
   number("task3_friction_stationary_enter_velocity_m_s",
@@ -319,8 +325,6 @@ ControlConfig load_config(const std::string& path) {
         config.task3_friction_blend_time_s > 0.0 &&
         config.task3_friction_breakaway_timeout_s > 0.0 &&
         config.task3_braking_deceleration_m_s2 > 0.0 &&
-        config.task3_early_brake_position_m > 0.0 &&
-        config.task3_early_brake_position_m < 0.05 &&
         config.task3_positive_early_brake_position_m > 0.0 &&
         config.task3_positive_early_brake_position_m <
             config.task3_positive_reached_position_m &&
@@ -332,9 +336,16 @@ ControlConfig load_config(const std::string& path) {
             config.position_soft_limit_m &&
         config.task3_positive_overshoot_deceleration_m_s2 >=
             config.task3_braking_deceleration_m_s2 &&
-        config.task3_positive_reverse_velocity_m_s >
-            config.task3_friction_rolling_enter_velocity_m_s &&
-        config.task3_reverse_balance_rate_limit_rad_s > 0.0 &&
+        config.task3_positive_reached_delay_s >= 0.0 &&
+        config.task3_balance_transition_s > 0.0 &&
+        std::isfinite(config.task3_balance_motor_position_rad) &&
+        config.task3_balance_motor_tolerance_rad > 0.0 &&
+        config.task3_finish_position_min_m <
+            config.task3_finish_position_max_m &&
+        config.task3_finish_position_min_m >=
+            -config.position_safe_limit_m &&
+        config.task3_finish_position_max_m <=
+            config.position_safe_limit_m &&
         config.task3_friction_stationary_enter_velocity_m_s >= 0.0 &&
         config.task3_friction_rolling_enter_velocity_m_s >
             config.task3_friction_stationary_enter_velocity_m_s &&
@@ -463,7 +474,8 @@ bool CsvLogger::open(const std::string& path) {
              "task3_stage,planned_x_m,planned_v_m_s,planned_a_m_s2,"
              "settle_position_ok,settle_velocity_ok,settle_theta_ok,settle_elapsed_ms,"
              "task3_early_braking,task3_positive_overshoot_recovery,"
-             "task3_reverse_balance_active,"
+             "task3_reverse_balance_active,task3_balance_elapsed_ms,"
+             "task3_balance_motor_error_rad,"
              "contest_startup_active,contest_startup_elapsed_s,"
              "contest_startup_target_rpm,contest_startup_speed_ref_rpm,"
              "contest_startup_acceleration_m_s2,"
@@ -506,6 +518,8 @@ void CsvLogger::write(double now_s, const ControlOutput& output, const TubeStatu
           << ',' << (output.task3_early_braking ? 1 : 0)
           << ',' << (output.task3_positive_overshoot_recovery ? 1 : 0)
           << ',' << (output.task3_reverse_balance_active ? 1 : 0)
+          << ',' << output.task3_balance_elapsed_ms
+          << ',' << output.task3_balance_motor_error_rad
           << ',' << (output.contest_startup_active ? 1 : 0)
           << ',' << output.contest_startup_elapsed_s
           << ',' << output.contest_startup_target_rpm

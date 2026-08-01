@@ -620,7 +620,7 @@ int main(int argc, char** argv) {
                     << (output.task3_early_braking ? 1 : 0)
                     << " overshoot_recovery="
                     << (output.task3_positive_overshoot_recovery ? 1 : 0)
-                    << " reverse_balance="
+                    << " zero_balance="
                     << (output.task3_reverse_balance_active ? 1 : 0)
                     << " flags=0x" << std::hex << static_cast<int>(output.command.flags) << std::dec
                     << " reason=" << output.reason << '\n';

@@ -19,8 +19,9 @@ NX不控制车轮，仍以50 Hz的 `tube-status-v3` 监控DMMC02管角状态。
 - 管角硬限幅、角速度限制、内环角差监控和轻量安全预测；视觉丢失100～250 ms
   先进入0° HOLD软保护，超过250 ms或软边界存在
   当前/预测风险时进入锁存SAFE；底盘、DMMC超时和±11.5 cm边界也会触发安全锁存；
-- Task3 使用五次连续轨迹完成 `0→+5→-5 cm`，端点采用位置、速度和实测管角
-  联合稳定判据；任务4/5/6启动前4.5秒使用85%运动学前馈和15% PID修正，
+- Task3 到达`+5 cm`判定后继续返程控制0.5秒，随后冻结位置轨迹并向DMMC下发
+  0°目标，0.3秒过渡后保持，球进入`[-6,-4] cm`即结束；任务4/5/6启动前
+  4.5秒使用85%运动学前馈和15% PID修正，
   随后切换为正常PID保持中心或指定位置，通用 `auto` 模式仍支持底盘阶段切换；
 - Task3 根据实测静摩擦死区进行带滞回的静/动摩擦前馈，突破后平滑降补偿，
   目标死区只保留 `-0.15°` 平衡偏置；PID、观察器与绝对管角命令使用分离的角度分量；
@@ -32,9 +33,9 @@ NX不控制车轮，仍以50 Hz的 `tube-status-v3` 监控DMMC02管角状态。
 
 - `config/nx-control.conf`中的`period_s=0.020`保持NX位置外环、PID和串口命令为
   50 Hz；Linux侧不创建1 kHz发送或忙等待控制线程。
-- `theta_rate_limit_rad_s`始终是rad/s物理量。普通阶段保持`3°/s`，Task3返程
-  拉回平衡位置时使用原`4°/s`的三分之二，即`8/3°/s`，不随DMMC02本地控制
-  周期缩放。
+- `theta_rate_limit_rad_s`始终是rad/s物理量。普通阶段保持`3°/s`；Task3平衡
+  覆盖开始时按实测/参考/上一命令中最大的绝对管角除以0.3秒计算一次限速，目标
+  管角直接下发0°，实际插值和机构逆解由DMMC02本地完成。
 - `tube-control-v3`、`tube-status-v3`的字段、TTL、`command_id`和CRC均未改变；
   DMMC02状态和NX命令仍各以50 Hz传输，本地1 kHz内环不增加串口流量。
 - DMMC02本地完成的PID、机构拟合、摩擦和安全参数不会因频率升级由NX自动改写；
@@ -146,17 +147,15 @@ python3 run_rgb.py --no-serial --position-mode rgb-contour --protocol tube-v3 \
 
 任务参数：
 
-- `--task 3`：赛题要求3，静止时按限速、限加速度和限 jerk 的五次轨迹执行
-  `O→+5→-5 cm`；正向运动超过`+3.5 cm`开始主动反向制动，实测位置只要严格
+- `--task 3`：赛题要求3，正向段使用限速、限加速度和限 jerk 的五次轨迹；
+  正向运动超过`+3.5 cm`开始主动反向制动，实测位置只要严格
   超过`+4.0 cm`，立即视为已经到达过`+5 cm`并切换返回段，不检查速度、实际
   管角、反馈状态、轨迹完成状态或稳定时间。若仍过冲到`+4.5 cm`外，则把反向
-  减速度由`0.15 m/s²`增强到`0.20 m/s²`。返程速度达到`-2.0 cm/s`后，
-  先以`8/3°/s`直接把实测管角拉回平衡偏置；进入平衡偏置±0.2°后，该阶段只退出
-  一次并恢复普通`3°/s`限速，由PID继续按位置和速度调整。返回`-5 cm`时达到
-  `-4.0 cm`立即执行一次主动反向紧急制动，直到速度降入5 mm/s稳定区；最终位置
-  误差不超过±1.0 cm、速度不超过
-  5 mm/s且实际管角处于平衡偏置±0.2°内后立即完成。参考轨迹上限为`4 cm/s`、
-  `6 cm/s²`和`15 cm/s³`，理想跟踪下的参考序列总时长约`7.04 s`；
+  减速度由`0.15 m/s²`增强到`0.20 m/s²`。到达判定同时启动0.5秒单调时钟；
+  到时后冻结返回参考、停用位置PID和摩擦/偏置补偿，向DMMC持续发送0°管角目标。
+  首帧限速按当前位置在0.3秒到达0°计算，DMMC机构逆解对应的期望电机平衡反馈为
+  `motor_position_rad=0.414473534`。过渡满0.3秒后继续保持0°，球心进入
+  `[-6,-4] cm`（含边界）立即结束Task3并进入`Idle`；
 - `--task 4`、`--task 5`：车辆行驶阶段始终保持中心 `O`；两个任务都按4.5秒
   五次曲线从0加速到70 RPM。`45`仍作为任务5的兼容别名。启动段PID只作15%
   小修正，结束后恢复正常视觉位置PID；不使用接收到的底盘速度、加速度或jerk；
@@ -235,8 +234,9 @@ python3 tools/analyze_log.py replay-output.csv --json replay-metrics.json
 `vision_age_ms`、PID各分量、饱和状态、实际管道角、底盘阶段和故障字段足以
 复现观测与控制决策。Task3还记录`task3_stage`、三阶一致的`planned_*`参考、
 三个`settle_*`判据及保持时间、`theta_pid/bias/friction/command_deg`、
-`friction_mode/direction`和`theta_actual_deg`，可直接定位换向、突破、滚动降补偿
-及最终死区。日志记录`pid_p/i/d/ff/disturbance`、未限幅/实际应用控制量、积分冻结、
+  `friction_mode/direction`和`theta_actual_deg`，以及平衡阶段耗时和电机位置误差
+  `task3_balance_elapsed_ms/task3_balance_motor_error_rad`。日志记录
+  `pid_p/i/d/ff/disturbance`、未限幅/实际应用控制量、积分冻结、
 积分限幅、输出饱和、`inner_angle_error_rad`和内环告警。日志还直接记录`wire_control_state`、`wire_flags`、
 `dmmc_controller_state`、`safety_latched`、`safety_event_id`和
 `last_stop_reason`；安全锁存/解除行会立即flush，不依赖每秒一次的终端摘要。
@@ -256,13 +256,16 @@ python3 tools/analyze_log.py replay-output.csv --json replay-metrics.json
 当前代码提供PID单测和离线重放；相机、DMMC及底盘实机接口
 仍需按上述顺序验收，不能用软件测试结果代替真机验收。
 
-NX的摆杆命令硬限幅为`±4.0°`，普通角速度限制为`3°/s`，Task3返程拉回平衡
-位置时使用`8/3°/s`。`tube-control-v3`在线路上仍使用厘度：
+NX的摆杆命令硬限幅为`±4.0°`，普通角速度限制为`3°/s`。Task3平衡阶段直接
+发送0°目标，并携带按0.3秒过渡计算的角速度限制。`tube-control-v3`在线路上仍使用厘度：
 `theta_cmd_cdeg`的1 LSB为`0.01°`。
 
 配套MC02固件应使用`default_rate_limit_deg_s=2.0`、
 `minimum_rate_limit_deg_s=0.5`、`maximum_rate_limit_deg_s=4.0`和
 `acceleration_limit_deg_s2=5.0`，但这些固件参数不属于本NX工程。
+若平衡阶段起始管角绝对值大于1.2°，上述`maximum_rate_limit_deg_s=4.0`会把NX按
+0.3秒计算的请求限速截低，实机将无法保证0.3秒到位；此时必须在DMMC侧结合机构
+安全范围提高最大速度/加速度，NX不会绕过DMMC本地安全限幅。
 NX比较DMMC02以50 Hz回传的`theta_reference`与`theta_actual`：角差超过1°持续
 0.2秒时请求底盘减速，超过2°持续0.5秒时锁存SAFE。驻留时间使用NX单调时钟的
 真实持续时间计算，不使用固定样本计数，也不要求DMMC02以1 kHz回传状态。该监控
@@ -270,5 +273,5 @@ NX比较DMMC02以50 Hz回传的`theta_reference`与`theta_actual`：角差超过
 
 `HoldTarget`在位置误差小于4 mm且估计速度小于15 mm/s时进入带滞回的静止区；
 位置误差超过8 mm才退出。非Task3静止区内暂停PID追踪，管道角度按3°/s限制缓慢
-回到0°。Task3在更严格的2.5 mm、5 mm/s死区内撤销方向摩擦补偿并回到
-`-0.15°`平衡偏置，避免反复突破静摩擦形成极限环。
+回到0°。Task3进入定时平衡阶段后无条件撤销PID、方向摩擦和`-0.15°`偏置，
+持续保持0°直到任务结束。
