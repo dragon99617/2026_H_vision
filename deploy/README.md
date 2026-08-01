@@ -49,6 +49,9 @@ combined `ball-vision-web.service` can own the Orbbec.
 2. Connect the phone to `AGX-336L` with the password chosen during install.
 3. Open `http://192.168.88.1:8080/`.
 4. Select task 3/4/5/6. Task selection starts immediately.
+5. Recording starts with the vision service. Use **Stop recording** before
+   opening **History playback**; this finalizes an MP4 with a native seek bar.
+   **Start recording** creates another session without restarting the service.
 
 The same API can be called directly:
 
@@ -59,6 +62,20 @@ curl -X POST -H 'Content-Type: application/json' \
   http://192.168.88.1:8080/api/vision/task
 curl -X POST http://192.168.88.1:8080/api/vision/stop
 ```
+
+Recordings are stored below `records/` by default. The browser routes and APIs
+are:
+
+```text
+GET  /records
+GET  /api/recording/status
+POST /api/recording/start
+POST /api/recording/stop
+```
+
+If GStreamer cannot create an MP4, the history page retains JPEG-frame
+playback. Recording parameters can be set during installation with
+`WEB_RECORD_DIR`, `WEB_RECORD_FPS`, and `WEB_MP4_BITRATE_KBPS`.
 
 ## Acceptance and diagnostics
 
@@ -72,6 +89,7 @@ Before competition, perform at least ten cold power-cycle tests and verify:
 - hotspot and page appear without SSH or keyboard intervention;
 - controller starts in `idle`;
 - image, vision health and DMMC health are visible;
+- recording can be stopped, replayed and restarted from the phone;
 - each task starts once, stop returns to zero angle, and reset selects task 5;
 - unplug/replug recovery works for both DMMC and Orbbec;
 - the physical emergency stop still works when Wi-Fi is disconnected.

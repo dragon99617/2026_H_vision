@@ -187,8 +187,15 @@ python3 run_rgb.py --no-serial --position-mode rgb-contour --protocol tube-v3 \
 --web-port 8080     启用共享图传和任务 HTTP 服务；0 为关闭
 --web-control-socket PATH  ball_nx_control 本地命令套接字
 --web-preview-width 640    仅缩放网页预览，不改变推理输入
+--web-record        保存带检测标注的网页预览，支持历史回放
+--web-record-dir records  历史录像目录
+--web-record-fps 20       录像和回放帧率
 --preview-scale N   仅 Debug 窗口缩放
 ```
+
+启用 `--web-record` 后，网页可停止当前录像、重新开始新录像，并从
+`/records` 打开历史回放。停止录像时会通过 GStreamer 生成可拖动进度条的
+MP4；转换不可用时仍可逐帧回放 JPEG。
 
 相机或串口断开后会循环重连。`SIGINT`、`SIGTERM`、`Ctrl+C` 均安全退出。
 

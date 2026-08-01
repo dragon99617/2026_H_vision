@@ -72,6 +72,13 @@ def positive_int(value: str) -> int:
     return parsed
 
 
+def positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0.0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
 def confidence_value(value: str) -> float:
     parsed = float(value)
     if not 0.0 <= parsed <= 1.0:
@@ -190,6 +197,16 @@ def add_common_arguments(
     parser.add_argument("--web-jpeg-quality", type=jpeg_quality, default=70)
     parser.add_argument("--web-interval-ms", type=positive_int, default=50)
     parser.add_argument("--web-preview-width", type=positive_int, default=640)
+    parser.add_argument(
+        "--web-record",
+        action="store_true",
+        help="record the shared annotated preview for browser history playback",
+    )
+    parser.add_argument("--web-record-dir", type=Path, default=Path("records"))
+    parser.add_argument("--web-record-prefix", default="ball_web")
+    parser.add_argument("--web-record-name", default="run")
+    parser.add_argument("--web-record-fps", type=positive_float, default=20.0)
+    parser.add_argument("--web-mp4-bitrate-kbps", type=positive_int, default=1200)
     parser.add_argument(
         "--metrics-json",
         type=Path,
@@ -512,6 +529,12 @@ class Runtime:
                 jpeg_quality=self.args.web_jpeg_quality,
                 interval_ms=self.args.web_interval_ms,
                 preview_width=self.args.web_preview_width,
+                record=self.args.web_record,
+                record_dir=self.args.web_record_dir,
+                record_prefix=self.args.web_record_prefix,
+                record_name=self.args.web_record_name,
+                record_fps=self.args.web_record_fps,
+                mp4_bitrate_kbps=self.args.web_mp4_bitrate_kbps,
             )
             self.web_server.start()
             host, port = self.web_server.address[:2]

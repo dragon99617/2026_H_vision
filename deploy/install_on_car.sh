@@ -15,6 +15,9 @@ WEB_PORT="${WEB_PORT:-8080}"
 WEB_JPEG_QUALITY="${WEB_JPEG_QUALITY:-70}"
 WEB_INTERVAL_MS="${WEB_INTERVAL_MS:-50}"
 WEB_PREVIEW_WIDTH="${WEB_PREVIEW_WIDTH:-640}"
+WEB_RECORD_DIR="${WEB_RECORD_DIR:-$APP_ROOT/records}"
+WEB_RECORD_FPS="${WEB_RECORD_FPS:-20}"
+WEB_MP4_BITRATE_KBPS="${WEB_MP4_BITRATE_KBPS:-1200}"
 START_NOW="${START_NOW:-0}"
 ACTIVATE_HOTSPOT_NOW="${ACTIVATE_HOTSPOT_NOW:-0}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -80,6 +83,17 @@ fi
     fail "WEB_INTERVAL_MS must be in 10..1000"
 [[ "$WEB_PREVIEW_WIDTH" =~ ^[0-9]+$ ]] && [ "$WEB_PREVIEW_WIDTH" -ge 160 ] && [ "$WEB_PREVIEW_WIDTH" -le 1920 ] || \
     fail "WEB_PREVIEW_WIDTH must be in 160..1920"
+[[ "$WEB_RECORD_FPS" =~ ^[0-9]+$ ]] && [ "$WEB_RECORD_FPS" -ge 1 ] && [ "$WEB_RECORD_FPS" -le 60 ] || \
+    fail "WEB_RECORD_FPS must be in 1..60"
+[[ "$WEB_MP4_BITRATE_KBPS" =~ ^[0-9]+$ ]] && [ "$WEB_MP4_BITRATE_KBPS" -ge 100 ] || \
+    fail "WEB_MP4_BITRATE_KBPS must be at least 100"
+case "$WEB_RECORD_DIR" in
+    /*) ;;
+    *) fail "WEB_RECORD_DIR must be an absolute path" ;;
+esac
+case "$WEB_RECORD_DIR" in
+    *' '*|*'|'*|*$'\n'*) fail "WEB_RECORD_DIR must not contain spaces, pipes or newlines" ;;
+esac
 
 # nmcli localizes boolean values (for example, zh_CN prints "是" instead of
 # "yes").  Force a stable machine-readable locale for capability checks.
@@ -115,6 +129,9 @@ printf '%s\n' \
     "WEB_JPEG_QUALITY=$WEB_JPEG_QUALITY" \
     "WEB_INTERVAL_MS=$WEB_INTERVAL_MS" \
     "WEB_PREVIEW_WIDTH=$WEB_PREVIEW_WIDTH" \
+    "WEB_RECORD_DIR=$WEB_RECORD_DIR" \
+    "WEB_RECORD_FPS=$WEB_RECORD_FPS" \
+    "WEB_MP4_BITRATE_KBPS=$WEB_MP4_BITRATE_KBPS" \
     >"$tmp_dir/ball-car.env"
 
 if [ "$DRY_RUN" = "1" ]; then
@@ -128,6 +145,7 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 
 "${ROOT[@]}" install -d -m 0755 /etc/ball-car
+"${ROOT[@]}" install -d -m 0750 -o "$CAR_USER" "$WEB_RECORD_DIR"
 "${ROOT[@]}" install -m 0644 "$tmp_dir/ball-car.env" /etc/ball-car/ball-car.env
 "${ROOT[@]}" install -m 0644 "$tmp_dir/ball-nx-control.service" \
     /etc/systemd/system/ball-nx-control.service

@@ -62,6 +62,7 @@ fi
 
 health_url="http://${WEB_HOST}:${WEB_PORT}/healthz"
 status_url="http://${WEB_HOST}:${WEB_PORT}/api/vision/status"
+recording_url="http://${WEB_HOST}:${WEB_PORT}/api/recording/status"
 if health_json="$(curl --max-time 2 -fsS "$health_url")"; then
     echo "$health_json"
     if grep -q '"frame_available": true' <<<"$health_json"; then
@@ -81,6 +82,16 @@ if control_json="$(curl --max-time 2 -fsS "$status_url")"; then
     fi
 else
     bad "controller API failed: $status_url"
+fi
+if recording_json="$(curl --max-time 2 -fsS "$recording_url")"; then
+    echo "$recording_json"
+    if grep -q '"enabled": true' <<<"$recording_json"; then
+        ok "history recording is enabled"
+    else
+        bad "recording API responds but recording is disabled"
+    fi
+else
+    bad "recording API failed: $recording_url"
 fi
 
 if [ "$failures" -eq 0 ]; then

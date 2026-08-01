@@ -24,7 +24,11 @@ ExecStart=/usr/bin/python3 @APP_ROOT@/run_rgb.py \
   --web-control-timeout-ms 500 \
   --web-jpeg-quality ${WEB_JPEG_QUALITY} \
   --web-interval-ms ${WEB_INTERVAL_MS} \
-  --web-preview-width ${WEB_PREVIEW_WIDTH}
+  --web-preview-width ${WEB_PREVIEW_WIDTH} \
+  --web-record \
+  --web-record-dir ${WEB_RECORD_DIR} \
+  --web-record-fps ${WEB_RECORD_FPS} \
+  --web-mp4-bitrate-kbps ${WEB_MP4_BITRATE_KBPS}
 Restart=always
 RestartSec=2
 TimeoutStopSec=15
