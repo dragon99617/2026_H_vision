@@ -514,6 +514,15 @@ void test_deployed_timing_contract() {
             std::abs(config.pid_kd_s_inv - 7.0) < 1e-12 &&
             std::abs(config.pid_integral_output_limit_m_s2) < 1e-12,
         "deployed config uses the requested safety limits and PID gains");
+  check(std::abs(config.contest_startup_duration_s - 4.5) < 1e-12 &&
+            std::abs(config.chassis_wheel_radius_m - 0.0325) < 1e-12 &&
+            std::abs(config.wheel_rpm_per_command_rpm - 1.0) < 1e-12 &&
+            std::abs(config.task4_startup_target_rpm - 70.0) < 1e-12 &&
+            std::abs(config.task5_startup_target_rpm - 70.0) < 1e-12 &&
+            std::abs(config.task6_startup_target_rpm - 70.0) < 1e-12 &&
+            std::abs(config.contest_startup_feedforward_scale - 0.85) < 1e-12 &&
+            std::abs(config.contest_startup_pid_scale - 0.15) < 1e-12,
+        "deployed config uses the 6.5 cm wheel and common 4.5 second 70 RPM startup");
   check(std::abs(config.task3_reference_max_velocity_m_s - 0.040) < 1e-12 &&
             std::abs(config.task3_reference_max_acceleration_m_s2 - 0.060) < 1e-12 &&
             std::abs(config.task3_reference_max_jerk_m_s3 - 0.150) < 1e-12 &&
@@ -669,7 +678,7 @@ void test_task_manager() {
   chassis.motion_phase = nx_control::MotionPhase::Accel;
   nx_control::ObserverState centered;
 
-  task.configure(nx_control::TaskMode::Contest45, 0.08, false);
+  task.configure(nx_control::TaskMode::Contest4, 0.08, false);
   check(task.state() == nx_control::TaskState::Idle,
         "contest task 4/5 can wait for an explicit local start");
   task.update(2.0, centered, &chassis);
@@ -1199,16 +1208,16 @@ void test_contest_chassis_gate() {
   check(legacy_static.request_stop && legacy_static.reason == "chassis_stale",
         "legacy static mode still requires fresh chassis");
 
-  const auto contest45 = tick_without_chassis(nx_control::TaskMode::Contest45, 50.0);
-  check(!contest45.request_stop &&
+  const auto contest45 = tick_without_chassis(nx_control::TaskMode::Contest4, 50.0);
+  check(!contest45.request_stop && contest45.contest_startup_active &&
             contest45.command.control_state == nx_control::TaskState::HoldCenter &&
-            std::abs(contest45.acceleration_used_m_s2) < 1e-12,
+            contest45.acceleration_used_m_s2 > 0.0,
         "contest task 4/5 runs camera feedback without a chassis state");
 
   const auto contest6 = tick_without_chassis(nx_control::TaskMode::Contest6, 55.0);
-  check(!contest6.request_stop &&
+  check(!contest6.request_stop && contest6.contest_startup_active &&
             contest6.command.control_state == nx_control::TaskState::HoldTarget &&
-            std::abs(contest6.acceleration_used_m_s2) < 1e-12,
+            contest6.acceleration_used_m_s2 > 0.0,
         "contest task 6 runs camera feedback without a chassis state");
 }
 
@@ -1261,7 +1270,8 @@ void test_contest456_ignores_chassis_dynamics() {
   };
 
   for (const auto mode_and_target :
-       {std::make_pair(nx_control::TaskMode::Contest45, 0.0),
+       {std::make_pair(nx_control::TaskMode::Contest4, 0.0),
+        std::make_pair(nx_control::TaskMode::Contest5, 0.0),
         std::make_pair(nx_control::TaskMode::Contest6, -0.073)}) {
     const auto without_chassis =
         run(mode_and_target.first, mode_and_target.second, false);
@@ -1273,9 +1283,94 @@ void test_contest456_ignores_chassis_dynamics() {
                        with_chassis.estimate.velocity_m_s) < 1e-12 &&
               std::abs(without_chassis.pid.unsaturated_m_s2 -
                        with_chassis.pid.unsaturated_m_s2) < 1e-12 &&
-              std::abs(with_chassis.acceleration_used_m_s2) < 1e-12,
-          "contest task 4/5/6 PID and observer ignore chassis dynamics");
+              std::abs(without_chassis.acceleration_used_m_s2 -
+                       with_chassis.acceleration_used_m_s2) < 1e-12 &&
+              with_chassis.acceleration_used_m_s2 > 0.0,
+          "contest task 4/5/6 use the planned startup and ignore received chassis dynamics");
   }
+}
+
+void test_contest456_quintic_startup_feedforward() {
+  nx_control::ControlConfig config;
+  config.measurement_sigma_m = 1e-6;
+  config.innovation_gate_sigma = 1e6;
+  config.vision_position_filter_tau_s = 0.0;
+  config.pid_ki_s3 = 0.8;
+  config.pid_integral_output_limit_m_s2 = 0.030;
+
+  auto sample = [&](nx_control::TaskMode mode, double target_m,
+                    double startup_elapsed_s, double position_m) {
+    nx_control::NxController controller(config);
+    constexpr double now_s = 200.0;
+    controller.reset(now_s);
+    controller.configure_task(mode, target_m, false, false);
+    controller.start_task(now_s - startup_elapsed_s);
+
+    nx_control::TubeStatus tube;
+    tube.sequence = 1U;
+    tube.dmmc_time_ms = 200000U;
+    tube.receive_time_s = now_s;
+    controller.ingest_tube_status(tube);
+
+    nx_control::VisionMeasurement vision;
+    vision.frame_id = 1U;
+    vision.status = nx_control::VisionStatus::Measured;
+    vision.position_m = position_m;
+    vision.ball_confidence = vision.tube_confidence = 1.0;
+    vision.capture_time_ms = 200000U;
+    vision.has_capture_time = true;
+    vision.receive_time_s = now_s;
+    controller.ingest_vision(vision);
+    return controller.tick(now_s);
+  };
+
+  constexpr double kPi = 3.14159265358979323846;
+  const double expected_peak_acceleration =
+      config.chassis_wheel_radius_m * (2.0 * kPi / 60.0) * 70.0 *
+      1.875 / config.contest_startup_duration_s;
+  const double expected_feedforward =
+      config.contest_startup_feedforward_scale * expected_peak_acceleration;
+
+  for (const auto mode : {nx_control::TaskMode::Contest4,
+                          nx_control::TaskMode::Contest5,
+                          nx_control::TaskMode::Contest6}) {
+    const auto output = sample(mode, 0.0, 2.25, 0.0);
+    check(output.contest_startup_active &&
+              std::abs(output.contest_startup_target_rpm - 70.0) < 1e-12 &&
+              std::abs(output.contest_startup_speed_ref_rpm - 35.0) < 1e-12 &&
+              std::abs(output.contest_startup_acceleration_m_s2 -
+                       expected_peak_acceleration) < 1e-12 &&
+              std::abs(output.pid.feedforward_m_s2 - expected_feedforward) <
+                  1e-12 &&
+              std::abs(output.contest_startup_feedforward_theta_rad -
+                       std::atan2(expected_feedforward, nx_control::kGravity)) <
+                  1e-12,
+          "Task 4/5/6 midpoint matches the 70 RPM quintic wheel kinematics");
+    check(output.pid.integrator_frozen &&
+              std::abs(output.pid.integral_m_s2) < 1e-12 &&
+              std::abs(output.contest_startup_pid_scale - 0.15) < 1e-12 &&
+              output.command.theta_cmd_rad > 0.0,
+          "Task 4/5/6 startup applies conservative feedforward with a small PID correction");
+  }
+
+  const auto startup_error =
+      sample(nx_control::TaskMode::Contest4, 0.0, 2.25, -0.010);
+  check(std::abs(startup_error.pid.proportional_m_s2 -
+                 config.contest_startup_pid_scale * config.pid_kp_s2 *
+                     startup_error.pid.position_error_m) < 1e-12,
+        "contest startup scales the PID correction to 15 percent");
+
+  const auto after_startup =
+      sample(nx_control::TaskMode::Contest4, 0.0, 4.5, -0.010);
+  check(!after_startup.contest_startup_active &&
+            std::abs(after_startup.contest_startup_speed_ref_rpm - 70.0) <
+                1e-12 &&
+            std::abs(after_startup.acceleration_used_m_s2) < 1e-12 &&
+            std::abs(after_startup.pid.proportional_m_s2 -
+                     config.pid_kp_s2 *
+                         after_startup.pid.position_error_m) < 1e-12 &&
+            std::abs(after_startup.contest_startup_pid_scale - 1.0) < 1e-12,
+        "normal full PID takes over exactly after the 4.5 second startup");
 }
 
 void test_contest3_waiting_holds_beam() {
@@ -1623,12 +1718,16 @@ void test_csv_task3_diagnostics() {
   std::string row;
   std::getline(stream, header);
   std::getline(stream, row);
-  const std::array<const char*, 32> required_fields{
+  const std::array<const char*, 39> required_fields{
       "task3_stage",       "planned_x_m",       "planned_v_m_s",
       "planned_a_m_s2",    "settle_position_ok", "settle_velocity_ok",
       "settle_theta_ok",    "settle_elapsed_ms", "task3_early_braking",
       "task3_positive_overshoot_recovery",
       "task3_reverse_balance_active",
+      "contest_startup_active", "contest_startup_elapsed_s",
+      "contest_startup_target_rpm", "contest_startup_speed_ref_rpm",
+      "contest_startup_acceleration_m_s2",
+      "contest_startup_feedforward_theta_deg", "contest_startup_pid_scale",
       "theta_pid_deg",
       "theta_bias_deg",     "theta_friction_deg", "theta_command_deg",
       "friction_mode",      "friction_direction", "theta_actual_deg",
@@ -1669,6 +1768,7 @@ int main() {
   test_controller_hold_deadband();
   test_contest_chassis_gate();
   test_contest456_ignores_chassis_dynamics();
+  test_contest456_quintic_startup_feedforward();
   test_contest3_waiting_holds_beam();
   test_controller_task3_friction_and_protocol();
   test_controller_task3_position_early_braking();

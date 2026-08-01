@@ -74,7 +74,10 @@ void TaskManager::configure(TaskMode mode, double target_m, bool start_immediate
                             bool start_on_chassis_event) {
   mode_ = mode;
   requested_target_m_ =
-      mode == TaskMode::Contest45 || mode == TaskMode::Contest3 ? 0.0 : target_m;
+      mode == TaskMode::Contest4 || mode == TaskMode::Contest5 ||
+              mode == TaskMode::Contest3
+          ? 0.0
+          : target_m;
   static_stage_ = 0;
   stable_since_s_ = -1.0;
   settle_elapsed_s_ = 0.0;
@@ -109,7 +112,8 @@ void TaskManager::start(double now_s) {
       begin_static_segment(now_s, segment_start, 0.05);
       break;
     case TaskMode::HoldCenter:
-    case TaskMode::Contest45:
+    case TaskMode::Contest4:
+    case TaskMode::Contest5:
       state_ = TaskState::HoldCenter;
       current_reference_.position_m = 0.0;
       segment_target_m_ = 0.0;
@@ -221,7 +225,8 @@ ReferencePoint TaskManager::update(double now_s, const ObserverState& estimate,
   last_update_s_ = now_s;
   if (state_ == TaskState::Safe || state_ == TaskState::Fault) return current_reference_;
   const bool accepts_chassis_start =
-      mode_ != TaskMode::Contest45 && mode_ != TaskMode::Contest6;
+      mode_ != TaskMode::Contest4 && mode_ != TaskMode::Contest5 &&
+      mode_ != TaskMode::Contest6;
   if (chassis != nullptr && accepts_chassis_start) {
     const std::uint16_t rising = static_cast<std::uint16_t>(chassis->events & ~previous_events_);
     previous_events_ = chassis->events;

@@ -12,8 +12,11 @@ class BallPid {
   PidResult calculate(const ObserverState& estimate,
                       const ReferencePoint& reference,
                       double chassis_acceleration_m_s2,
-                      bool allow_integrator);
-  PidResult track(double applied_m_s2, bool force_freeze);
+                      bool allow_integrator,
+                      double correction_scale = 1.0,
+                      double feedforward_scale = 1.0);
+  PidResult track(double applied_m_s2, bool force_freeze,
+                  bool allow_back_calculation = true);
 
   double integral_output_m_s2() const { return integral_output_m_s2_; }
   const PidResult& last_result() const { return last_result_; }

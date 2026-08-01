@@ -33,10 +33,19 @@ class NxController {
   const TaskManager& task_manager() const { return task_manager_; }
 
  private:
+  struct ContestStartupProfile {
+    bool active = false;
+    double elapsed_s = 0.0;
+    double target_rpm = 0.0;
+    double speed_ref_rpm = 0.0;
+    double acceleration_m_s2 = 0.0;
+  };
+
   double model_u_from_actual_theta(double theta_actual_rad) const;
   double rate_limit_final_angle(double requested_theta_rad,
                                 double rate_limit_rad_s) const;
   bool contest_uses_camera_feedback_only() const;
+  ContestStartupProfile contest_startup_profile(double now_s) const;
   double chassis_acceleration_for_control(double now_s) const;
   bool hold_prediction_crosses_soft_boundary(const ObserverState& estimate,
                                              double actuator_u_m_s2,
@@ -77,6 +86,7 @@ class NxController {
   double previous_theta_command_rad_ = 0.0;
   double previous_model_compensation_rad_ = 0.0;
   bool previous_model_compensation_active_ = false;
+  double contest_startup_start_s_ = -1.0;
   int task3_early_brake_stage_ = -1;
   bool task3_early_braking_active_ = false;
   bool task3_early_braking_done_ = false;

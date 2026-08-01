@@ -117,10 +117,10 @@ nx_control::TaskMode parse_task(const std::string& value) {
   if (value == "target") return nx_control::TaskMode::HoldTarget;
   if (value == "auto") return nx_control::TaskMode::AutoVehicle;
   if (value == "3" || value == "task3") return nx_control::TaskMode::Contest3;
-  if (value == "4" || value == "5" || value == "45" || value == "4-5" ||
-      value == "task4" || value == "task5" || value == "task45" ||
-      value == "task4_5") {
-    return nx_control::TaskMode::Contest45;
+  if (value == "4" || value == "task4") return nx_control::TaskMode::Contest4;
+  if (value == "5" || value == "45" || value == "4-5" ||
+      value == "task5" || value == "task45" || value == "task4_5") {
+    return nx_control::TaskMode::Contest5;
   }
   if (value == "6" || value == "task6") return nx_control::TaskMode::Contest6;
   throw std::invalid_argument(
@@ -167,8 +167,8 @@ Options parse_options(int argc, char** argv) {
     else if (argument == "--max-seconds") options.max_seconds = std::stod(value());
     else if (argument == "--help") {
       std::cout << "ball_nx_control [--config FILE] [--dmmc DEVICE] [--vision-port PORT]\n"
-                   "  [--task 3|45|6|idle|static|center|target|auto] [--target-cm CM]\n"
-                   "  [--wait-start | --key-start]  (--wait-start is unavailable for 45/6)\n"
+                   "  [--task 3|4|5|6|idle|static|center|target|auto] [--target-cm CM]\n"
+                   "  [--wait-start | --key-start]  (--wait-start is unavailable for 4/5/6)\n"
                    "  [--log CSV] [--state-file FILE] [--start-command-id ID]\n"
                    "  [--command-socket PATH]\n"
                    "  [--dry-run] [--max-seconds SECONDS]\n";
@@ -184,7 +184,8 @@ Options parse_options(int argc, char** argv) {
     throw std::invalid_argument("task 6 requires --target-cm CM");
   }
   if (options.wait_start &&
-      (options.task == nx_control::TaskMode::Contest45 ||
+      (options.task == nx_control::TaskMode::Contest4 ||
+       options.task == nx_control::TaskMode::Contest5 ||
        options.task == nx_control::TaskMode::Contest6)) {
     throw std::invalid_argument(
         "tasks 4/5/6 do not use chassis events; use immediate start or --key-start");
@@ -218,7 +219,9 @@ std::string initial_task_name(nx_control::TaskMode mode) {
   switch (mode) {
     case nx_control::TaskMode::Contest3:
       return "3";
-    case nx_control::TaskMode::Contest45:
+    case nx_control::TaskMode::Contest4:
+      return "4";
+    case nx_control::TaskMode::Contest5:
       return "5";
     case nx_control::TaskMode::Contest6:
       return "6";
@@ -241,7 +244,8 @@ std::string control_mode_name(nx_control::TaskMode mode) {
     case nx_control::TaskMode::Contest3:
     case nx_control::TaskMode::StaticSequence:
       return "swing_test";
-    case nx_control::TaskMode::Contest45:
+    case nx_control::TaskMode::Contest4:
+    case nx_control::TaskMode::Contest5:
     case nx_control::TaskMode::HoldCenter:
       return "hold_center";
     case nx_control::TaskMode::Contest6:
@@ -304,7 +308,7 @@ RuntimeCommandResult apply_runtime_command(
     return result;
   }
   if (command.type == nx_control::RuntimeCommandType::Reset) {
-    controller.configure_task(nx_control::TaskMode::Contest45, 0.0, false, false);
+    controller.configure_task(nx_control::TaskMode::Contest5, 0.0, false, false);
     controller.stop_task();
     runtime.active_task = "5";
     runtime.control_mode = "hold_center";
@@ -332,9 +336,10 @@ RuntimeCommandResult apply_runtime_command(
   double target_m = 0.0;
   if (command.task == "3") {
     mode = nx_control::TaskMode::Contest3;
-  } else if (command.task == "4" || command.task == "5" ||
-             command.task == "45") {
-    mode = nx_control::TaskMode::Contest45;
+  } else if (command.task == "4") {
+    mode = nx_control::TaskMode::Contest4;
+  } else if (command.task == "5" || command.task == "45") {
+    mode = nx_control::TaskMode::Contest5;
   } else if (command.task == "6") {
     if (!command.target_cm.has_value()) {
       result.ok = result.applied = false;

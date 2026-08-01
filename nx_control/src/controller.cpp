@@ -12,6 +12,11 @@ bool sequence_is_newer(std::uint32_t value, std::uint32_t previous) {
   return static_cast<std::int32_t>(value - previous) > 0;
 }
 
+bool is_contest_startup_mode(TaskMode mode) {
+  return mode == TaskMode::Contest4 || mode == TaskMode::Contest5 ||
+         mode == TaskMode::Contest6;
+}
+
 }  // namespace
 
 NxController::NxController(const ControlConfig& config)
@@ -28,6 +33,8 @@ void NxController::configure_task(TaskMode mode, double target_m, bool start_imm
   inner_angle_warning_since_s_ = -1.0;
   inner_angle_safe_since_s_ = -1.0;
   task_manager_.configure(mode, target_m, start_immediately, start_on_chassis_event);
+  contest_startup_start_s_ =
+      start_immediately && is_contest_startup_mode(mode) ? last_tick_s_ : -1.0;
 }
 
 void NxController::start_task(double now_s) {
@@ -49,6 +56,8 @@ void NxController::start_task(double now_s) {
   inner_angle_safe_since_s_ = -1.0;
   pid_.reset();
   task_manager_.start(now_s);
+  contest_startup_start_s_ =
+      is_contest_startup_mode(task_manager_.mode()) ? now_s : -1.0;
 }
 
 void NxController::stop_task() {
@@ -57,6 +66,7 @@ void NxController::stop_task() {
   previous_theta_command_rad_ = 0.0;
   previous_model_compensation_rad_ = 0.0;
   previous_model_compensation_active_ = false;
+  contest_startup_start_s_ = -1.0;
   task3_early_brake_stage_ = -1;
   task3_early_braking_active_ = false;
   task3_early_braking_done_ = false;
@@ -88,6 +98,7 @@ void NxController::reset(double now_s) {
   previous_theta_command_rad_ = 0.0;
   previous_model_compensation_rad_ = 0.0;
   previous_model_compensation_active_ = false;
+  contest_startup_start_s_ = -1.0;
   task3_early_brake_stage_ = -1;
   task3_early_braking_active_ = false;
   task3_early_braking_done_ = false;
@@ -252,12 +263,54 @@ double NxController::rate_limit_final_angle(
 
 bool NxController::contest_uses_camera_feedback_only() const {
   const TaskMode mode = task_manager_.mode();
-  return mode == TaskMode::Contest45 || mode == TaskMode::Contest6;
+  return is_contest_startup_mode(mode);
+}
+
+NxController::ContestStartupProfile NxController::contest_startup_profile(
+    double now_s) const {
+  ContestStartupProfile profile;
+  const TaskMode mode = task_manager_.mode();
+  if (!is_contest_startup_mode(mode) || contest_startup_start_s_ < 0.0 ||
+      task_manager_.state() == TaskState::Idle ||
+      task_manager_.state() == TaskState::Safe ||
+      task_manager_.state() == TaskState::Fault) {
+    return profile;
+  }
+
+  if (mode == TaskMode::Contest4) {
+    profile.target_rpm = config_.task4_startup_target_rpm;
+  } else if (mode == TaskMode::Contest5) {
+    profile.target_rpm = config_.task5_startup_target_rpm;
+  } else {
+    profile.target_rpm = config_.task6_startup_target_rpm;
+  }
+  profile.elapsed_s = std::max(0.0, now_s - contest_startup_start_s_);
+  const double s = std::clamp(
+      profile.elapsed_s / config_.contest_startup_duration_s, 0.0, 1.0);
+  const double s2 = s * s;
+  const double s3 = s2 * s;
+  const double s4 = s3 * s;
+  const double s5 = s4 * s;
+  profile.speed_ref_rpm =
+      profile.target_rpm * (10.0 * s3 - 15.0 * s4 + 6.0 * s5);
+  profile.active = profile.elapsed_s < config_.contest_startup_duration_s;
+  if (profile.active) {
+    const double speed_slope_rpm_s =
+        profile.target_rpm * 30.0 * s2 * (1.0 - s) * (1.0 - s) /
+        config_.contest_startup_duration_s;
+    constexpr double kRpmToRadiansPerSecond =
+        2.0 * 3.14159265358979323846 / 60.0;
+    profile.acceleration_m_s2 =
+        config_.contest_startup_acceleration_sign *
+        config_.chassis_wheel_radius_m * config_.wheel_rpm_per_command_rpm *
+        kRpmToRadiansPerSecond * speed_slope_rpm_s;
+  }
+  return profile;
 }
 
 double NxController::chassis_acceleration_for_control(double now_s) const {
   return contest_uses_camera_feedback_only()
-             ? 0.0
+             ? contest_startup_profile(now_s).acceleration_m_s2
              : chassis_sync_.delay_compensated_actual_acceleration(now_s);
 }
 
@@ -301,8 +354,10 @@ ControlOutput NxController::tick(double now_s,
   if (last_tick_s_ == 0.0) reset(now_s);
   const bool chassis_valid = chassis_sync_.valid(now_s);
   const bool camera_feedback_only = contest_uses_camera_feedback_only();
+  const ContestStartupProfile startup = contest_startup_profile(now_s);
   const double chassis_acceleration =
-      camera_feedback_only ? 0.0 : chassis_acceleration_for_control(now_s);
+      camera_feedback_only ? startup.acceleration_m_s2
+                           : chassis_acceleration_for_control(now_s);
   const double actual_u =
       have_tube_status_
           ? model_u_from_actual_theta(tube_status_.theta_actual_rad)
@@ -313,6 +368,13 @@ ControlOutput NxController::tick(double now_s,
   ControlOutput output;
   output.estimate = observer_.state();
   output.acceleration_used_m_s2 = chassis_acceleration;
+  output.contest_startup_active = startup.active;
+  output.contest_startup_elapsed_s = startup.elapsed_s;
+  output.contest_startup_target_rpm = startup.target_rpm;
+  output.contest_startup_speed_ref_rpm = startup.speed_ref_rpm;
+  output.contest_startup_acceleration_m_s2 = startup.acceleration_m_s2;
+  output.contest_startup_pid_scale =
+      startup.active ? config_.contest_startup_pid_scale : 1.0;
   output.vision_age_ms = last_accepted_vision_s_ >= 0.0
                              ? 1000.0 * std::max(0.0, now_s - last_accepted_vision_s_)
                              : std::numeric_limits<double>::infinity();
@@ -344,7 +406,8 @@ ControlOutput NxController::tick(double now_s,
       task_manager_.mode() == TaskMode::Contest3 && task_manager_.state() == TaskState::Idle;
   const bool task_safety_active =
       task_manager_.state() != TaskState::Idle || contest3_waiting_for_start;
-  const bool target_hold_deadband = task_manager_.target_hold_deadband_active();
+  const bool target_hold_deadband =
+      task_manager_.target_hold_deadband_active() && !startup.active;
 
   const bool vision_soft_hold =
       task_safety_active && !contest3_waiting_for_start &&
@@ -379,7 +442,15 @@ ControlOutput NxController::tick(double now_s,
   if (!pid_active) pid_.reset();
   output.pid = pid_.calculate(output.estimate, output.reference,
                               chassis_acceleration,
-                              pid_active && !target_hold_deadband);
+                              pid_active && !target_hold_deadband && !startup.active,
+                              startup.active ? config_.contest_startup_pid_scale : 1.0,
+                              startup.active
+                                  ? config_.contest_startup_feedforward_scale
+                                  : 1.0);
+  output.contest_startup_feedforward_theta_rad =
+      startup.active
+          ? std::atan2(output.pid.feedforward_m_s2, kGravity)
+          : 0.0;
   double requested_u = pid_active ? output.pid.unsaturated_m_s2 : 0.0;
   if (pid_active && !target_hold_deadband) {
     if (vision_age_s > config_.vision_decay_start_s) {
@@ -612,14 +683,15 @@ ControlOutput NxController::tick(double now_s,
           : kGravity * std::tan(applied_dynamic_theta_rad);
   const bool pid_forced_override =
       target_hold_deadband || task3_reverse_balance_active_ || task3_braking_active ||
-      friction.target_deadband;
+      friction.target_deadband || startup.active;
   if (force_zero_command) {
     pid_.reset();
     output.pid = pid_.last_result();
     output.pid.applied_m_s2 = 0.0;
     output.pid.integrator_frozen = true;
   } else {
-    output.pid = pid_.track(applied_u, pid_forced_override);
+    output.pid = pid_.track(applied_u, pid_forced_override,
+                            !startup.active);
   }
 
   previous_applied_u_ = applied_u;

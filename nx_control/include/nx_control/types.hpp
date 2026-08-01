@@ -37,8 +37,10 @@ enum class TaskMode : std::uint8_t {
   HoldTarget = 3,
   AutoVehicle = 4,
   Contest3 = 5,   // H problem requirement 3: O -> +5 cm -> -5 cm.
-  Contest45 = 6,  // H problem requirements 4/5: hold O while driving.
+  Contest4 = 6,   // H problem requirement 4: hold O while driving.
   Contest6 = 7,   // H problem requirement 6: hold a selected point while driving.
+  Contest5 = 8,   // H problem requirement 5: hold O while preserving task identity.
+  Contest45 = Contest5,  // Backward-compatible API alias for the old combined mode.
 };
 enum class FrictionMode : std::uint8_t {
   Hold = 0,
@@ -171,6 +173,13 @@ struct ControlOutput {
   FrictionMode friction_mode = FrictionMode::Hold;
   int friction_direction = 0;
   double acceleration_used_m_s2 = 0.0;
+  bool contest_startup_active = false;
+  double contest_startup_elapsed_s = 0.0;
+  double contest_startup_target_rpm = 0.0;
+  double contest_startup_speed_ref_rpm = 0.0;
+  double contest_startup_acceleration_m_s2 = 0.0;
+  double contest_startup_feedforward_theta_rad = 0.0;
+  double contest_startup_pid_scale = 1.0;
   double vision_age_ms = std::numeric_limits<double>::infinity();
   double vision_capture_age_ms = std::numeric_limits<double>::infinity();
   double chassis_age_ms = std::numeric_limits<double>::infinity();
@@ -200,6 +209,17 @@ struct ControlConfig {
   double pid_integral_output_limit_m_s2 = 0.0;
   double pid_integral_enable_error_m = 0.030;
   double pid_anti_windup_gain_s_inv = 5.0;
+  // Task 4/5/6 chassis start model. RPM is interpreted at the wheel after
+  // applying wheel_rpm_per_command_rpm (1.0 when n_ref already is wheel RPM).
+  double contest_startup_duration_s = 4.5;
+  double chassis_wheel_radius_m = 0.0325;
+  double wheel_rpm_per_command_rpm = 1.0;
+  double contest_startup_acceleration_sign = 1.0;
+  double task4_startup_target_rpm = 70.0;
+  double task5_startup_target_rpm = 70.0;
+  double task6_startup_target_rpm = 70.0;
+  double contest_startup_feedforward_scale = 0.85;
+  double contest_startup_pid_scale = 0.15;
   double inner_angle_warning_rad =
       1.0 * 3.14159265358979323846 / 180.0;
   double inner_angle_safe_rad =

@@ -186,6 +186,17 @@ ControlConfig load_config(const std::string& path) {
          config.pid_integral_enable_error_m);
   number("pid_anti_windup_gain_s_inv",
          config.pid_anti_windup_gain_s_inv);
+  number("contest_startup_duration_s", config.contest_startup_duration_s);
+  number("chassis_wheel_radius_m", config.chassis_wheel_radius_m);
+  number("wheel_rpm_per_command_rpm", config.wheel_rpm_per_command_rpm);
+  number("contest_startup_acceleration_sign",
+         config.contest_startup_acceleration_sign);
+  number("task4_startup_target_rpm", config.task4_startup_target_rpm);
+  number("task5_startup_target_rpm", config.task5_startup_target_rpm);
+  number("task6_startup_target_rpm", config.task6_startup_target_rpm);
+  number("contest_startup_feedforward_scale",
+         config.contest_startup_feedforward_scale);
+  number("contest_startup_pid_scale", config.contest_startup_pid_scale);
   number("inner_angle_warning_rad", config.inner_angle_warning_rad);
   number("inner_angle_safe_rad", config.inner_angle_safe_rad);
   number("inner_angle_warning_dwell_s",
@@ -271,6 +282,18 @@ ControlConfig load_config(const std::string& path) {
         config.pid_integral_output_limit_m_s2 >= 0.0 &&
         config.pid_integral_enable_error_m > 0.0 &&
         config.pid_anti_windup_gain_s_inv >= 0.0 &&
+        config.contest_startup_duration_s > 0.0 &&
+        config.chassis_wheel_radius_m > 0.0 &&
+        config.wheel_rpm_per_command_rpm > 0.0 &&
+        std::abs(config.contest_startup_acceleration_sign) > 0.0 &&
+        std::abs(config.contest_startup_acceleration_sign) <= 1.0 &&
+        config.task4_startup_target_rpm > 0.0 &&
+        config.task5_startup_target_rpm > 0.0 &&
+        config.task6_startup_target_rpm > 0.0 &&
+        config.contest_startup_feedforward_scale >= 0.0 &&
+        config.contest_startup_feedforward_scale <= 1.0 &&
+        config.contest_startup_pid_scale >= 0.0 &&
+        config.contest_startup_pid_scale <= 1.0 &&
         config.inner_angle_warning_rad > 0.0 &&
         config.inner_angle_safe_rad > config.inner_angle_warning_rad &&
         config.inner_angle_warning_dwell_s >= 0.0 &&
@@ -441,6 +464,10 @@ bool CsvLogger::open(const std::string& path) {
              "settle_position_ok,settle_velocity_ok,settle_theta_ok,settle_elapsed_ms,"
              "task3_early_braking,task3_positive_overshoot_recovery,"
              "task3_reverse_balance_active,"
+             "contest_startup_active,contest_startup_elapsed_s,"
+             "contest_startup_target_rpm,contest_startup_speed_ref_rpm,"
+             "contest_startup_acceleration_m_s2,"
+             "contest_startup_feedforward_theta_deg,contest_startup_pid_scale,"
              "theta_pid_deg,theta_bias_deg,theta_friction_deg,theta_command_deg,"
              "friction_mode,friction_direction,theta_actual_deg,"
              "x_m,v_m_s,d_m_s2,x_ref_m,position_error_m,velocity_error_m_s,u_cmd_m_s2,"
@@ -479,6 +506,14 @@ void CsvLogger::write(double now_s, const ControlOutput& output, const TubeStatu
           << ',' << (output.task3_early_braking ? 1 : 0)
           << ',' << (output.task3_positive_overshoot_recovery ? 1 : 0)
           << ',' << (output.task3_reverse_balance_active ? 1 : 0)
+          << ',' << (output.contest_startup_active ? 1 : 0)
+          << ',' << output.contest_startup_elapsed_s
+          << ',' << output.contest_startup_target_rpm
+          << ',' << output.contest_startup_speed_ref_rpm
+          << ',' << output.contest_startup_acceleration_m_s2
+          << ',' << output.contest_startup_feedforward_theta_rad *
+                         kRadiansToDegrees
+          << ',' << output.contest_startup_pid_scale
           << ',' << output.theta_pid_rad * kRadiansToDegrees
           << ',' << output.theta_bias_rad * kRadiansToDegrees
           << ',' << output.theta_friction_rad * kRadiansToDegrees
