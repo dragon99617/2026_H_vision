@@ -26,7 +26,6 @@ void NxController::configure_task(TaskMode mode, double target_m, bool start_imm
                                   bool start_on_chassis_event) {
   pid_.reset();
   inner_angle_warning_since_s_ = -1.0;
-  inner_angle_safe_since_s_ = -1.0;
   task_manager_.configure(mode, target_m, start_immediately, start_on_chassis_event);
 }
 
@@ -46,7 +45,6 @@ void NxController::start_task(double now_s) {
   visual_position_filter_initialized_ = false;
   friction_compensator_.reset();
   inner_angle_warning_since_s_ = -1.0;
-  inner_angle_safe_since_s_ = -1.0;
   pid_.reset();
   task_manager_.start(now_s);
 }
@@ -64,7 +62,6 @@ void NxController::stop_task() {
   task3_reverse_balance_done_ = false;
   friction_compensator_.reset();
   inner_angle_warning_since_s_ = -1.0;
-  inner_angle_safe_since_s_ = -1.0;
   pid_.reset();
 }
 
@@ -80,7 +77,6 @@ void NxController::reset(double now_s) {
   chassis_clock_.reset();
   v2_clock_initialized_ = false;
   latest_vision_capture_age_ms_ = std::numeric_limits<double>::infinity();
-  latest_visual_position_valid_ = false;
   filtered_visual_position_m_ = 0.0;
   visual_position_filter_time_s_ = 0.0;
   visual_position_filter_initialized_ = false;
@@ -95,7 +91,6 @@ void NxController::reset(double now_s) {
   task3_reverse_balance_done_ = false;
   friction_compensator_.reset();
   inner_angle_warning_since_s_ = -1.0;
-  inner_angle_safe_since_s_ = -1.0;
   pid_.reset();
   safety_latched_ = false;
   safety_fault_latched_ = false;
@@ -140,14 +135,13 @@ void NxController::ingest_vision(VisionMeasurement measurement) {
       1000.0 *
       std::max(0.0, measurement.receive_time_s - measurement.capture_time_s);
 
-  // Keep the unfiltered measured position for the independent hard-boundary
-  // safety check. Only the position sent to the observer is smoothed.
+  // Bypass smoothing near the soft boundary so slowdown decisions see the
+  // measured position without additional filter lag.
   const double raw_position_m = measurement.position_m;
-  latest_visual_position_valid_ =
+  const bool visual_position_valid =
       measurement.status == VisionStatus::Measured &&
       measurement.ball_confidence * measurement.tube_confidence >= 0.30;
-  if (latest_visual_position_valid_) {
-    latest_visual_position_m_ = raw_position_m;
+  if (visual_position_valid) {
     const bool near_soft_boundary =
         std::abs(raw_position_m) >= config_.position_soft_limit_m - 0.010;
     if (config_.vision_position_filter_tau_s > 0.0 &&
@@ -353,20 +347,11 @@ ControlOutput NxController::tick(double now_s,
   const bool vision_hard_lost =
       task_safety_active && !contest3_waiting_for_start &&
       vision_age_s > config_.vision_loss_safe_s;
-  const bool chassis_stale = !chassis_valid;
-  const bool chassis_fresh_required =
-      task_safety_active && task_manager_.mode() != TaskMode::Contest3 &&
-      !camera_feedback_only;
-  const bool chassis_gate_failed = chassis_fresh_required && chassis_stale;
   const bool force_safe_feedforward =
-      vision_soft_hold || vision_hard_lost || chassis_gate_failed || safety_latched_;
+      vision_soft_hold || vision_hard_lost || safety_latched_;
   if (vision_hard_lost) {
     output.request_stop = true;
     output.reason = "vision_stale";
-  }
-  if (chassis_gate_failed) {
-    output.request_stop = true;
-    output.reason = "chassis_stale";
   }
   if (task_safety_active && dmmc_stale) {
     output.request_stop = true;
@@ -421,11 +406,6 @@ ControlOutput NxController::tick(double now_s,
     } else {
       inner_angle_warning_since_s_ = -1.0;
     }
-    if (abs_inner_error > config_.inner_angle_safe_rad) {
-      if (inner_angle_safe_since_s_ < 0.0) inner_angle_safe_since_s_ = now_s;
-    } else {
-      inner_angle_safe_since_s_ = -1.0;
-    }
     output.inner_angle_warning =
         inner_angle_warning_since_s_ >= 0.0 &&
         now_s - inner_angle_warning_since_s_ >=
@@ -434,38 +414,8 @@ ControlOutput NxController::tick(double now_s,
       output.request_slowdown = true;
       if (output.reason.empty()) output.reason = "inner_angle_tracking_warning";
     }
-    if (inner_angle_safe_since_s_ >= 0.0 &&
-        now_s - inner_angle_safe_since_s_ >=
-            config_.inner_angle_safe_dwell_s) {
-      output.request_stop = true;
-      output.reason = "inner_angle_tracking_error";
-    }
   } else {
     inner_angle_warning_since_s_ = -1.0;
-    inner_angle_safe_since_s_ = -1.0;
-  }
-  const bool outside_soft_boundary =
-      std::abs(output.estimate.position_m) >= config_.position_soft_limit_m ||
-      (latest_visual_position_valid_ &&
-       std::abs(latest_visual_position_m_) >= config_.position_soft_limit_m);
-  const double prediction_horizon_s =
-      std::max(0.0, config_.vision_loss_safe_s - vision_age_s);
-  const bool predicted_soft_boundary =
-      vision_soft_hold &&
-      hold_prediction_crosses_soft_boundary(output.estimate, actual_u,
-                                            chassis_acceleration, prediction_horizon_s);
-  if (vision_soft_hold && (outside_soft_boundary || predicted_soft_boundary)) {
-    output.request_stop = true;
-    output.reason =
-        outside_soft_boundary ? "vision_lost_outside_soft_boundary"
-                              : "vision_lost_predicted_soft_boundary";
-  }
-  if (task_safety_active && !contest3_waiting_for_start &&
-      (std::abs(output.estimate.position_m) > config_.position_safe_limit_m ||
-       (latest_visual_position_valid_ &&
-        std::abs(latest_visual_position_m_) > config_.position_safe_limit_m))) {
-    output.request_stop = true;
-    output.reason = "ball_safety_boundary";
   }
   if (output.request_stop) latch_safety(output.reason, dmmc_stale);
   if (safety_latched_) {

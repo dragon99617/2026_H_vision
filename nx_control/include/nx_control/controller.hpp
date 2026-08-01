@@ -67,8 +67,6 @@ class NxController {
   double v2_capture_time_s_ = 0.0;
   double latest_vision_capture_age_ms_ =
       std::numeric_limits<double>::infinity();
-  double latest_visual_position_m_ = 0.0;
-  bool latest_visual_position_valid_ = false;
   double filtered_visual_position_m_ = 0.0;
   double visual_position_filter_time_s_ = 0.0;
   bool visual_position_filter_initialized_ = false;
@@ -83,7 +81,6 @@ class NxController {
   bool task3_reverse_balance_active_ = false;
   bool task3_reverse_balance_done_ = false;
   double inner_angle_warning_since_s_ = -1.0;
-  double inner_angle_safe_since_s_ = -1.0;
   bool safety_latched_ = false;
   bool safety_fault_latched_ = false;
   bool clear_comm_warning_pending_ = false;

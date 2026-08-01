@@ -424,9 +424,8 @@ void test_pid_controller() {
   check(std::abs(config.task3_reverse_balance_rate_limit_rad_s -
                  (8.0 / 3.0) * 3.14159265358979323846 / 180.0) < 1e-12,
         "Task 3 return-to-balance rate is two thirds of 4 degrees per second");
-  check(std::abs(config.inner_angle_warning_dwell_s - 0.20) < 1e-12 &&
-            std::abs(config.inner_angle_safe_dwell_s - 0.50) < 1e-12,
-        "inner-angle watchdog defaults remain 0.2 s warning and 0.5 s SAFE");
+  check(std::abs(config.inner_angle_warning_dwell_s - 0.20) < 1e-12,
+        "inner-angle watchdog defaults to a 0.2 s slowdown warning");
   check(std::abs(config.pid_kp_s2 - 6.0) < 1e-12 &&
             std::abs(config.pid_ki_s3) < 1e-12 &&
             std::abs(config.pid_kd_s_inv - 7.0) < 1e-12 &&
@@ -508,12 +507,11 @@ void test_deployed_timing_contract() {
                      (8.0 / 3.0) * 3.14159265358979323846 / 180.0) < 1e-12,
         "deployed config preserves the 4 degree clamp and slower Task 3 return balancing");
   check(std::abs(config.position_soft_limit_m - 0.085) < 1e-12 &&
-            std::abs(config.position_safe_limit_m - 0.100) < 1e-12 &&
             std::abs(config.pid_kp_s2 - 6.0) < 1e-12 &&
             std::abs(config.pid_ki_s3) < 1e-12 &&
             std::abs(config.pid_kd_s_inv - 7.0) < 1e-12 &&
             std::abs(config.pid_integral_output_limit_m_s2) < 1e-12,
-        "deployed config uses the requested safety limits and PID gains");
+        "deployed config uses the requested soft-boundary and PID gains");
   check(std::abs(config.task3_reference_max_velocity_m_s - 0.040) < 1e-12 &&
             std::abs(config.task3_reference_max_acceleration_m_s2 - 0.060) < 1e-12 &&
             std::abs(config.task3_reference_max_jerk_m_s3 - 0.150) < 1e-12 &&
@@ -526,11 +524,8 @@ void test_deployed_timing_contract() {
         "deployed config uses the requested slower Task 3 trajectory and earlier braking");
   check(std::abs(config.inner_angle_warning_rad -
                  1.0 * 3.14159265358979323846 / 180.0) < 1e-12 &&
-            std::abs(config.inner_angle_safe_rad -
-                     2.0 * 3.14159265358979323846 / 180.0) < 1e-12 &&
-            std::abs(config.inner_angle_warning_dwell_s - 0.20) < 1e-12 &&
-            std::abs(config.inner_angle_safe_dwell_s - 0.50) < 1e-12,
-        "deployed config preserves inner-angle thresholds and real-time dwell durations");
+            std::abs(config.inner_angle_warning_dwell_s - 0.20) < 1e-12,
+        "deployed config preserves the inner-angle slowdown threshold and dwell");
 }
 
 void test_task_manager() {
@@ -923,9 +918,29 @@ void test_controller_safety() {
   chassis.receive_time_s = 20.15;
   boundary_controller.ingest_chassis_state(chassis);
   output = boundary_controller.tick(20.15);
-  check(output.safety_latched &&
-            output.last_stop_reason == "vision_lost_outside_soft_boundary",
-        "soft-boundary crossing during vision loss enters SAFE immediately");
+  check(!output.safety_latched && !output.request_stop &&
+            output.request_slowdown &&
+            output.command.control_state == nx_control::TaskState::StandbyHold &&
+            output.reason == "vision_soft_hold",
+        "soft-boundary crossing during vision loss remains a non-latching HOLD");
+
+  tube.sequence = 3U;
+  tube.dmmc_time_ms = 20160U;
+  tube.receive_time_s = 20.16;
+  boundary_controller.ingest_tube_status(tube);
+  chassis.sequence = 3U;
+  chassis.chassis_time_ms = 20160U;
+  chassis.receive_time_s = 20.16;
+  boundary_controller.ingest_chassis_state(chassis);
+  vision.frame_id = 2U;
+  vision.position_m = 0.105;
+  vision.capture_time_ms = 20160U;
+  vision.receive_time_s = 20.16;
+  boundary_controller.ingest_vision(vision);
+  output = boundary_controller.tick(20.16);
+  check(!output.safety_latched && !output.request_stop &&
+            output.command.control_state == nx_control::TaskState::HoldCenter,
+        "position beyond the former hard boundary does not enter SAFE");
 
   nx_control::ControlConfig prediction_config = config;
   prediction_config.innovation_gate_sigma = 1000.0;
@@ -977,9 +992,11 @@ void test_controller_safety() {
   prediction_chassis.ttl_ms = 100U;
   prediction_controller.ingest_chassis_state(prediction_chassis);
   output = prediction_controller.tick(30.13);
-  check(output.safety_latched &&
-            output.last_stop_reason == "vision_lost_predicted_soft_boundary",
-        "predicted soft-boundary crossing during vision loss enters SAFE immediately");
+  check(!output.safety_latched && !output.request_stop &&
+            output.request_slowdown &&
+            output.command.control_state == nx_control::TaskState::StandbyHold &&
+            output.reason == "vision_soft_hold",
+        "predicted soft-boundary crossing during vision loss remains a non-latching HOLD");
 }
 
 void test_controller_power_on_idle_is_disabled_without_inputs() {
@@ -1089,13 +1106,15 @@ void test_inner_angle_watchdog() {
             !output.safety_latched,
         "one-degree inner-loop error triggers after 0.2 s of real elapsed time");
   output = tick_with_tracking_error(4U, 65.499);
-  check(!output.safety_latched,
-        "inner-angle SAFE does not latch before 0.5 s despite irregular samples");
+  check(output.inner_angle_warning && output.request_slowdown &&
+            !output.safety_latched,
+        "persistent inner-angle error remains a slowdown warning");
   output = tick_with_tracking_error(5U, 65.501);
-  check(output.safety_latched &&
-            output.last_stop_reason == "inner_angle_tracking_error" &&
-            output.command.control_state == nx_control::TaskState::Safe,
-        "two-degree inner-loop error latches SAFE after 0.5 s of real elapsed time");
+  check(output.inner_angle_warning && output.request_slowdown &&
+            !output.request_stop && !output.safety_latched &&
+            output.last_stop_reason.empty() &&
+            output.command.control_state == nx_control::TaskState::HoldCenter,
+        "inner-angle error never escalates from slowdown to SAFE");
 }
 
 void test_controller_hold_deadband() {
@@ -1165,7 +1184,7 @@ void test_controller_hold_deadband() {
         "HoldTarget deadband settles theta at zero without resuming PID corrections");
 }
 
-void test_contest_chassis_gate() {
+void test_controller_without_chassis_safety_gate() {
   nx_control::ControlConfig config;
   auto tick_without_chassis = [&](nx_control::TaskMode mode, double now_s) {
     nx_control::NxController controller(config);
@@ -1192,12 +1211,13 @@ void test_contest_chassis_gate() {
   const auto contest3 = tick_without_chassis(nx_control::TaskMode::Contest3, 30.0);
   check(!contest3.request_stop &&
             contest3.command.control_state == nx_control::TaskState::StaticMove,
-        "explicit contest task 3 bypasses chassis-fresh gate");
+        "contest task 3 runs without a chassis safety gate");
 
   const auto legacy_static =
       tick_without_chassis(nx_control::TaskMode::StaticSequence, 40.0);
-  check(legacy_static.request_stop && legacy_static.reason == "chassis_stale",
-        "legacy static mode still requires fresh chassis");
+  check(!legacy_static.request_stop && !legacy_static.safety_latched &&
+            legacy_static.command.control_state == nx_control::TaskState::StaticMove,
+        "legacy static mode no longer locks on a missing chassis state");
 
   const auto contest45 = tick_without_chassis(nx_control::TaskMode::Contest45, 50.0);
   check(!contest45.request_stop &&
@@ -1667,7 +1687,7 @@ int main() {
   test_controller_angle_limit();
   test_inner_angle_watchdog();
   test_controller_hold_deadband();
-  test_contest_chassis_gate();
+  test_controller_without_chassis_safety_gate();
   test_contest456_ignores_chassis_dynamics();
   test_contest3_waiting_holds_beam();
   test_controller_task3_friction_and_protocol();

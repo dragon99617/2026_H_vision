@@ -175,7 +175,6 @@ ControlConfig load_config(const std::string& path) {
   number("theta_limit_rad", config.theta_limit_rad);
   number("theta_rate_limit_rad_s", config.theta_rate_limit_rad_s);
   number("position_soft_limit_m", config.position_soft_limit_m);
-  number("position_safe_limit_m", config.position_safe_limit_m);
   number("pid_kp_s2", config.pid_kp_s2);
   number("pid_ki_s3", config.pid_ki_s3);
   number("pid_kd_s_inv", config.pid_kd_s_inv);
@@ -187,10 +186,8 @@ ControlConfig load_config(const std::string& path) {
   number("pid_anti_windup_gain_s_inv",
          config.pid_anti_windup_gain_s_inv);
   number("inner_angle_warning_rad", config.inner_angle_warning_rad);
-  number("inner_angle_safe_rad", config.inner_angle_safe_rad);
   number("inner_angle_warning_dwell_s",
          config.inner_angle_warning_dwell_s);
-  number("inner_angle_safe_dwell_s", config.inner_angle_safe_dwell_s);
   number("hold_enter_position_error_m", config.hold_enter_position_error_m);
   number("hold_enter_velocity_m_s", config.hold_enter_velocity_m_s);
   number("hold_exit_position_error_m", config.hold_exit_position_error_m);
@@ -272,9 +269,7 @@ ControlConfig load_config(const std::string& path) {
         config.pid_integral_enable_error_m > 0.0 &&
         config.pid_anti_windup_gain_s_inv >= 0.0 &&
         config.inner_angle_warning_rad > 0.0 &&
-        config.inner_angle_safe_rad > config.inner_angle_warning_rad &&
         config.inner_angle_warning_dwell_s >= 0.0 &&
-        config.inner_angle_safe_dwell_s > 0.0 &&
         config.vision_position_filter_tau_s >= 0.0 &&
         config.predicted_min_confidence >= 0.0 && config.predicted_min_confidence <= 1.0 &&
         config.vision_frame_rate_hz > 0.0 &&
@@ -282,7 +277,6 @@ ControlConfig load_config(const std::string& path) {
         config.vision_decay_start_s < config.vision_loss_hold_s &&
         config.vision_loss_hold_s < config.vision_loss_safe_s &&
         config.position_soft_limit_m > 0.0 &&
-        config.position_safe_limit_m > config.position_soft_limit_m &&
         config.task3_reference_max_velocity_m_s > 0.0 &&
         config.task3_reference_max_acceleration_m_s2 > 0.0 &&
         config.task3_reference_max_jerk_m_s3 > 0.0 &&

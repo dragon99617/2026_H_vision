@@ -192,7 +192,6 @@ struct ControlConfig {
   double theta_limit_rad = 4.0 * 3.14159265358979323846 / 180.0;
   double theta_rate_limit_rad_s = 3.0 * 3.14159265358979323846 / 180.0;
   double position_soft_limit_m = 0.085;
-  double position_safe_limit_m = 0.100;
   double pid_kp_s2 = 6.0;
   double pid_ki_s3 = 0.0;
   double pid_kd_s_inv = 7.0;
@@ -202,10 +201,7 @@ struct ControlConfig {
   double pid_anti_windup_gain_s_inv = 5.0;
   double inner_angle_warning_rad =
       1.0 * 3.14159265358979323846 / 180.0;
-  double inner_angle_safe_rad =
-      2.0 * 3.14159265358979323846 / 180.0;
   double inner_angle_warning_dwell_s = 0.20;
-  double inner_angle_safe_dwell_s = 0.50;
   double hold_enter_position_error_m = 0.004;
   double hold_enter_velocity_m_s = 0.015;
   double hold_exit_position_error_m = 0.008;
